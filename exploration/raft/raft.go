@@ -18,6 +18,8 @@ const (
 	ELEC_TIMER_MAX = 3000
 
 	HEARTBEAT_TIMER = 15
+
+	APPEND_ENTRIES_MAX_LOG_SLICE_LENGTH = 5
 )
 
 type RpcObject struct {
@@ -48,7 +50,6 @@ type ConsensusModule struct {
 }
 
 func NewConsensusModule(callback func(op []string) (bool, error), config []string) *ConsensusModule {
-
 	// TODO: proper initialization of CM
 	cm := ConsensusModule{}
 	cm.state_update_callback = callback
@@ -57,7 +58,6 @@ func NewConsensusModule(callback func(op []string) (bool, error), config []strin
 }
 
 func (cm *ConsensusModule) Start() {
-
 	l, err := net.Listen("tcp", RAFT_PORT)
 	if err != nil {
 		fmt.Println(err)
@@ -77,14 +77,15 @@ func (cm *ConsensusModule) Start() {
 	cm.electiontimer = time.AfterFunc(d, cm.StartElection)
 
 	for {
+		// TODO: either move elecTimer.Reset in RPC calls or handle rpc.ServeConn(l.Listen ... ) manually
+		// WARN: srv.Accept runs a for loop within itself
 		cm.rpcSrv.Accept(l)
 		cm.resetElectionTimer()
-		log.Println("Accepted new conn")
+		log.Println("Accepted new connection")
 	}
 }
 
 func (cm *ConsensusModule) canIVote() bool {
-
 	// TODO: determine if can vote
 	// INFO: can not vote if parat of new config but still syncing log
 
@@ -109,7 +110,6 @@ func (cm *ConsensusModule) termCheck(term int) bool {
 }
 
 func (cm *ConsensusModule) appendLogEntries(cc_idx int, entries []LogEntry) {
-
 	cm.log = append(cm.log[:cc_idx+1], entries...)
 
 	// INFO: if received CC, apply it rightaway
@@ -121,7 +121,6 @@ func (cm *ConsensusModule) appendLogEntries(cc_idx int, entries []LogEntry) {
 }
 
 func (cm *ConsensusModule) applyToState(leader_commit_idx int) {
-
 	target_commit_idx := min(leader_commit_idx, len(cm.log)-1)
 
 	for _, entry := range cm.log[cm.commitIdx+1 : target_commit_idx+1] {
@@ -133,7 +132,6 @@ func (cm *ConsensusModule) applyToState(leader_commit_idx int) {
 			}
 		}
 	}
-
 }
 
 func (cm *ConsensusModule) resetElectionTimer() {
@@ -177,7 +175,6 @@ type AppendEntriesRPCResponse struct {
 }
 
 func (o *RpcObject) AppendEntriesRPC(args AppendEntriesRPCArgs, response *AppendEntriesRPCResponse) error {
-
 	if !o.cm.termCheck(args.term) {
 		response.state = RV_RPC_TERM_TOO_LOW
 		return nil
@@ -212,7 +209,6 @@ type RequestVoteRPCResponse struct {
 }
 
 func (o *RpcObject) RequestVoteRPC(args RequestVoteRPCArgs, response *RequestVoteRPCResponse) error {
-
 	// TODO: if minimum election timeout not reached, ingnore
 	// INFO: because comese from stray node waiting shutdown, not in the cluster anymore
 
@@ -254,7 +250,6 @@ const (
 )
 
 func getRandTimer(min, max int) (time.Duration, error) {
-
 	randTime := rand.IntN(max-min) + min
 
 	d, err := time.ParseDuration(strconv.Itoa(randTime) + "ms")
@@ -266,7 +261,6 @@ func getRandTimer(min, max int) (time.Duration, error) {
 }
 
 func (cm *ConsensusModule) StartElection() {
-
 	// TODO: add election timer check
 
 	d, err := getRandTimer(ELEC_TIMER_MIN, ELEC_TIMER_MAX)
@@ -285,10 +279,8 @@ func (cm *ConsensusModule) StartElection() {
 
 	resultChan := make(chan bool, 0)
 
-	for k, _ := range cm.rpcClients {
-
+	for k := range cm.rpcClients {
 		go func(resChan chan<- bool) {
-
 			args := RequestVoteRPCArgs{}
 			resp := RequestVoteRPCResponse{}
 			cm.rpcClients[k].Call("RpcObject.RequestVoteRPC", args, &resp)
@@ -316,11 +308,9 @@ func (cm *ConsensusModule) StartElection() {
 	}
 
 	go cm.startLeaderCycle()
-
 }
 
 func (cm *ConsensusModule) startLeaderCycle() {
-
 	cm.status = STATUS_LEADER
 
 	// TODO: heartbeats
@@ -331,16 +321,13 @@ func (cm *ConsensusModule) startLeaderCycle() {
 
 		command: []string{},
 	}
-
 }
 
 func (cm *ConsensusModule) CommitEntry(cmd []string) error {
-
 	cm.replicateCommand(cmd)
 
 	cm.commitQueue <- struct{}{}
 	err := <-cm.commitResult
-
 	if err != nil {
 		return err
 	}
@@ -349,7 +336,6 @@ func (cm *ConsensusModule) CommitEntry(cmd []string) error {
 }
 
 func (cm *ConsensusModule) replicateCommand(cmd []string) {
-
 	cm.currIdx++
 
 	cm.log = append(cm.log, LogEntry{
@@ -360,17 +346,14 @@ func (cm *ConsensusModule) replicateCommand(cmd []string) {
 }
 
 func (cm *ConsensusModule) startHeartbeadCycle() {
-
 	d := HEARTBEAT_TIMER * time.Millisecond
 	hbTimer := time.NewTimer(d)
 
 	for {
 		for _, client := range cm.rpcClients {
-
 			go func() {
 				client.Call("RpcObject.AppendEntriesRPC", AppendEntriesRPCArgs{}, &AppendEntriesRPCResponse{})
 			}()
-
 		}
 
 		<-hbTimer.C
@@ -378,12 +361,26 @@ func (cm *ConsensusModule) startHeartbeadCycle() {
 }
 
 func (cm *ConsensusModule) startreplicationCycle() {
-
 	for _, client := range cm.rpcClients {
+		go cm.followerReplicator(client)
+	}
+}
 
-		go func(cl *rpc.Client) {
+func (cm *ConsensusModule) followerReplicator(cl *rpc.Client) {
+	followerCommitIdx := new(uint)
+	followerCommitIdx = nil
+	*followerCommitIdx = uint(cm.commitIdx)
 
-		}(client)
+	if followerCommitIdx == nil {
+	} else if *followerCommitIdx > 0 {
 	}
 
+	for True {
+		args := &AppendEntriesRPCArgs{
+			term:    int(cm.currTerm),
+			cc_term: cm.log[followerCommitIdx].term,
+			cc_idx:  cm.log[followerCommitIdx].idx,
+			entries: cm.log[followerCommitIdx+1 : followerCommitIdx+1+APPEND_ENTRIES_MAX_LOG_SLICE_LENGTH],
+		}
+	}
 }
