@@ -366,21 +366,39 @@ func (cm *ConsensusModule) startreplicationCycle() {
 	}
 }
 
-func (cm *ConsensusModule) followerReplicator(cl *rpc.Client) {
+func (cm *ConsensusModule) followerReplicator(cl *rpc.Client, newNode bool, ackChan chan<- uint) {
+	// TODO: extend "nil idx" comcept to whole program
 	followerCommitIdx := new(uint)
-	followerCommitIdx = nil
 	*followerCommitIdx = uint(cm.commitIdx)
+	followerIdx := uint(0)
 
-	if followerCommitIdx == nil {
-	} else if *followerCommitIdx > 0 {
-	}
+	for true {
+		// TODO: should probably be a locking channel
+		if canReplicate() {
+			args := &AppendEntriesRPCArgs{
+				term:    int(cm.currTerm),
+				cc_term: cm.log[followerIdx].term,
+				cc_idx:  int(followerIdx),
+				// TODO: allow entries bundle, fix appendEntriesRPC entries possible out of bounds
+				entries: []LogEntry{cm.log[int(followerIdx+1)]}, // : followerIdx+1+APPEND_ENTRIES_MAX_LOG_SLICE_LENGTH],
 
-	for True {
-		args := &AppendEntriesRPCArgs{
-			term:    int(cm.currTerm),
-			cc_term: cm.log[followerCommitIdx].term,
-			cc_idx:  cm.log[followerCommitIdx].idx,
-			entries: cm.log[followerCommitIdx+1 : followerCommitIdx+1+APPEND_ENTRIES_MAX_LOG_SLICE_LENGTH],
+				leader_commit_idx: cm.commitIdx,
+			}
+
+			ret := AppendEntriesRPCResponse{}
+			err := cl.Call("RpcObject.AppendEntrieRPC", args, &ret)
+			if err != nil {
+				// FIXME: communicate client ID
+				// TODO: should probably retry
+				panic("couldn't call client RPC")
+			}
+
+			if ret.state == RV_RPC_C_CHECK_FAIL {
+				*followerCommitIdx--
+			} else {
+				// TODO: use buffer chan
+				ackChan <- followerIdx
+			}
 		}
 	}
 }
