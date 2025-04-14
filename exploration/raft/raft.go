@@ -46,7 +46,10 @@ type ConsensusModule struct {
 	log []LogEntry
 
 	commitQueue  chan<- struct{} // TODO: WTF?
-	commitResult <-chan error // TODO: WTF?
+	commitResult <-chan error    // TODO: WTF?
+
+	// INFO: each replicator sends info on this chan to signal entries replication
+	ackChan chan<- uint
 }
 
 func NewConsensusModule(callback func(op []string) (bool, error), config []string) *ConsensusModule {
@@ -397,8 +400,33 @@ func (cm *ConsensusModule) followerReplicator(cl *rpc.Client, newNode bool, ackC
 				*followerCommitIdx--
 			} else {
 				// TODO: use buffer chan
-				ackChan <- followerIdx
+				ackChan <- followerIdx + 1
 			}
 		}
+	}
+}
+
+func (cm *ConsensusModule) ConsensusTrackerLoop() {
+	confA := map[uint]uint{}
+	confB := map[uint]uint{}
+
+	for true {
+		replicatedEntryID := <-cm.ackChan
+
+		// if ID never replicated
+		if _, ok := confA[replicatedEntryID]; !ok {
+			// create ID entry
+			confA[replicatedEntryID] = 1
+		} else {
+			// else increment counter
+			confA[replicatedEntryID]++
+		}
+
+		if confA[replicatedEntryID] >= cm.commitQuorum && cm.commitIdx < replicatedEntryID {
+			cm.commitIdx = replicatedEntryID
+
+			// TODO: apply state change
+		}
+
 	}
 }
