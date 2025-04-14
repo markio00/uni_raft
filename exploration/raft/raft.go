@@ -27,26 +27,26 @@ type RpcObject struct {
 }
 
 type ConsensusModule struct {
-	state_update_callback func(operation []string) (bool, error)
+	state_update_callback func(operation []string) (bool, error) // TODO: How does this work?
 
 	status ServerStatus
 
 	rpcSrv     rpc.Server
 	rpcClients map[string]*rpc.Client
 
-	votedFor string
+	votedFor string // TODO: Should be an option type (nodes may not have yet voted)
 
 	currTerm uint
 	currIdx  uint
 
-	commitIdx int
+	commitIdx int // INFO: Index of highest log entry known to be committed
 
 	electiontimer *time.Timer
 
 	log []LogEntry
 
-	commitQueue  chan<- struct{}
-	commitResult <-chan error
+	commitQueue  chan<- struct{} // TODO: WTF?
+	commitResult <-chan error // TODO: WTF?
 }
 
 func NewConsensusModule(callback func(op []string) (bool, error), config []string) *ConsensusModule {
@@ -60,7 +60,7 @@ func NewConsensusModule(callback func(op []string) (bool, error), config []strin
 func (cm *ConsensusModule) Start() {
 	l, err := net.Listen("tcp", RAFT_PORT)
 	if err != nil {
-		fmt.Println(err)
+		fmt.Println(err) // FIXME: Shouldn't this panic?
 	}
 	defer l.Close()
 
@@ -102,10 +102,10 @@ func (cm *ConsensusModule) ConsistencyCheck(cc_term, cc_idx int) bool {
 }
 
 func (cm *ConsensusModule) termCheck(term int) bool {
-	// TODO: cm.term:  > term reject, if = term ok, if > term fall back to follwer
+	// TODO: cm.term:  > term reject, if = term ok, if > term fall back to follower
 	// INFO: handle term difference
 
-	// WARN: refactpr
+	// WARN: refactor
 	return true
 }
 
@@ -210,7 +210,7 @@ type RequestVoteRPCResponse struct {
 
 func (o *RpcObject) RequestVoteRPC(args RequestVoteRPCArgs, response *RequestVoteRPCResponse) error {
 	// TODO: if minimum election timeout not reached, ingnore
-	// INFO: because comese from stray node waiting shutdown, not in the cluster anymore
+	// INFO: because comes from stray node waiting shutdown, not in the cluster anymore
 
 	if !o.cm.termCheck(int(args.cc_term)) {
 		response.state = RV_RPC_TERM_TOO_LOW
@@ -254,7 +254,7 @@ func getRandTimer(min, max int) (time.Duration, error) {
 
 	d, err := time.ParseDuration(strconv.Itoa(randTime) + "ms")
 	if err != nil {
-		return 0, err
+		return 0, err // FIXME: Shouldn't panic?
 	}
 
 	return d, nil
@@ -345,7 +345,7 @@ func (cm *ConsensusModule) replicateCommand(cmd []string) {
 	})
 }
 
-func (cm *ConsensusModule) startHeartbeadCycle() {
+func (cm *ConsensusModule) startHeartbeatCycle() {
 	d := HEARTBEAT_TIMER * time.Millisecond
 	hbTimer := time.NewTimer(d)
 
