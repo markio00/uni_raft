@@ -108,18 +108,24 @@ func (cm *ConsensusModule) appendLogEntries(cc_idx int, entries []LogEntry) {
 	}
 }
 
-func (cm *ConsensusModule) applyToState(leader_commit_idx int) {
+func (cm *ConsensusModule) applyToState(leader_commit_idx int) error {
 	target_commit_idx := min(leader_commit_idx, len(cm.log)-1)
+	// INFO: check if replicas behind of leader commit, have to apply whole log
+
+	// WARN: when used from leader, log length will always be ahead of commit level
+	// WARN: return type only useful to leader (?)
 
 	for _, entry := range cm.log[cm.commitIdx+1 : target_commit_idx+1] {
 		if entry.command[0] != "CC" {
-			ok, err := cm.state_update_callback(entry.command)
-			if !ok || err != nil {
-				// TODO: handle state application error
-				panic("logic fault or hw error occurred")
+			err := cm.state_update_callback(entry.command)
+			if err != nil {
+				// TODO: handle state application error (hw / logic fault)
+				return nil
 			}
 		}
 	}
+
+	return nil
 }
 
 func (cm *ConsensusModule) resetElectionTimer() {
@@ -345,8 +351,7 @@ func (cm *ConsensusModule) ConsensusTrackerLoop() {
 			cm.commitIdx = idx
 
 			// TODO: apply state change
-			err := cm.state_update_callback(cm.log[idx].command)
-
+			err := cm.applyToState(idx)
 			<-cm.commitQueue
 
 			cm.commitResult <- err
