@@ -1,7 +1,6 @@
 package raft
 
 import (
-	"fmt"
 	"log"
 	"math/rand/v2"
 	"net"
@@ -27,10 +26,6 @@ const (
 
 	APPEND_ENTRIES_MAX_LOG_SLICE_LENGTH = 5
 )
-
-type RpcObject struct {
-	cm *ConsensusModule
-}
 
 type ConsensusModule struct {
 	// INFO: defined in server scope
@@ -69,34 +64,6 @@ func NewConsensusModule(callback func(op []string) error, config []string) *Cons
 	cm.state_update_callback = callback
 
 	return &cm
-}
-
-func (cm *ConsensusModule) Start() {
-	l, err := net.Listen("tcp", RAFT_PORT)
-	if err != nil {
-		panic(err.Error())
-	}
-	defer l.Close()
-
-	obj := new(RpcObject)
-	obj.cm = cm
-	cm.rpcSrv.Register(obj)
-
-	log.Println("Listening RPCs on port", RAFT_PORT)
-
-	d, err := getRandTimer(ELEC_TIMER_MIN, ELEC_TIMER_MAX)
-	if err != nil {
-		panic("timer setup fail")
-	}
-	cm.electiontimer = time.AfterFunc(d, cm.StartElection)
-
-	for {
-		// TODO: either move elecTimer.Reset in RPC calls or handle rpc.ServeConn(l.Listen ... ) manually
-		// WARN: srv.Accept runs a for loop within itself
-		cm.rpcSrv.Accept(l)
-		cm.resetElectionTimer()
-		log.Println("Accepted new connection")
-	}
 }
 
 func (cm *ConsensusModule) canIVote() bool {
@@ -156,103 +123,11 @@ func (cm *ConsensusModule) apply_CC(cfg []string) {
 	// TODO: change running config and apply
 }
 
-type rpcStateResponse int
-
-const (
-	RV_RPC_UNABLE_TO_VOTE rpcStateResponse = iota
-	RV_RPC_ALREADY_VOTED
-	RV_RPC_C_CHECK_FAIL
-	RV_RPC_VOTE_GRANTED
-	RV_RPC_TERM_TOO_LOW
-)
-
 type LogEntry struct {
 	term int
 	idx  int
 
 	command []string
-}
-
-type AppendEntriesRPCArgs struct {
-	term int
-
-	cc_term int
-	cc_idx  int
-
-	entries []LogEntry
-
-	leader_commit_idx int
-}
-
-type AppendEntriesRPCResponse struct {
-	state rpcStateResponse
-}
-
-func (o *RpcObject) AppendEntriesRPC(args AppendEntriesRPCArgs, response *AppendEntriesRPCResponse) error {
-	if !o.cm.termCheck(args.term) {
-		response.state = RV_RPC_TERM_TOO_LOW
-		return nil
-	}
-
-	// INFO: is Heartbeat?
-	if len(args.entries) == 0 {
-		// TODO: respond 'HB received' to caller
-		return nil
-	}
-
-	if !o.cm.ConsistencyCheck(args.cc_term, args.cc_idx) {
-		response.state = RV_RPC_C_CHECK_FAIL
-		return nil
-	}
-
-	o.cm.appendLogEntries(args.cc_idx, args.entries)
-
-	go o.cm.applyToState(args.leader_commit_idx)
-
-	return nil
-}
-
-type RequestVoteRPCArgs struct {
-	caller string
-
-	cc_idx  uint
-	cc_term uint
-}
-type RequestVoteRPCResponse struct {
-	state rpcStateResponse
-}
-
-func (o *RpcObject) RequestVoteRPC(args RequestVoteRPCArgs, response *RequestVoteRPCResponse) error {
-	// TODO: if minimum election timeout not reached, ingnore
-	// INFO: because comes from stray node waiting shutdown, not in the cluster anymore
-
-	if !o.cm.termCheck(int(args.cc_term)) {
-		response.state = RV_RPC_TERM_TOO_LOW
-		return nil
-	}
-
-	if !o.cm.canIVote() {
-		response.state = RV_RPC_UNABLE_TO_VOTE
-		return nil
-	}
-
-	if o.cm.votedFor != "" {
-		response.state = RV_RPC_ALREADY_VOTED
-		return nil
-	}
-
-	// FIXME: C check is for append, RV_RPC grants vote if candidate has higher term  on last entry or same term and higher id on last entry than local (raft paper $ 5.4.1)
-	if !o.cm.ConsistencyCheck(int(args.cc_term), int(args.cc_idx)) {
-		// FIXME: not a consistency check (raft paper $ 5.4.1)
-		response.state = RV_RPC_C_CHECK_FAIL
-	}
-
-	// Vote
-	o.cm.votedFor = args.caller
-
-	response.state = RV_RPC_VOTE_GRANTED
-
-	return nil
 }
 
 type ServerStatus int
@@ -296,12 +171,12 @@ func (cm *ConsensusModule) startElection() {
 	for k := range cm.rpcClients {
 		go func(resChan chan<- bool) {
 			args := RequestVoteRPCArgs{}
-			resp := RequestVoteRPCResponse{}
+			resp := RPCResponse{}
 			cm.rpcClients[k].Call("RpcObject.RequestVoteRPC", args, &resp)
 
 			// WARN: we explicitely decided not to implement a different retry timeout (from the election timer)
 
-			resChan <- resp.state == RV_RPC_VOTE_GRANTED
+			resChan <- resp.state == RPC_VOTE_GRANTED
 		}(resultChan)
 	}
 
@@ -366,7 +241,7 @@ func (cm *ConsensusModule) startHeartbeatCycle() {
 	for {
 		for _, client := range cm.rpcClients {
 			go func() {
-				client.Call("RpcObject.AppendEntriesRPC", AppendEntriesRPCArgs{}, &AppendEntriesRPCResponse{})
+				client.Call("RpcObject.AppendEntriesRPC", AppendEntriesRPCArgs{}, &RPCResponse{})
 			}()
 		}
 
@@ -399,7 +274,7 @@ func (cm *ConsensusModule) followerReplicator(cl *rpc.Client, newNode bool, ackC
 				leader_commit_idx: cm.commitIdx,
 			}
 
-			ret := AppendEntriesRPCResponse{}
+			ret := RPCResponse{}
 			err := cl.Call("RpcObject.AppendEntrieRPC", args, &ret)
 			if err != nil {
 				// FIXME: communicate client ID
