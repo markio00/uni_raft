@@ -10,6 +10,12 @@ import (
 	"time"
 )
 
+func assert(cond bool, msg string) {
+	if !cond {
+		panic(msg)
+	}
+}
+
 const (
 	RAFT_PORT = ":8530"
 	MY_ID     = "xxx.xxx.xxx.xxx"
@@ -27,7 +33,8 @@ type RpcObject struct {
 }
 
 type ConsensusModule struct {
-	state_update_callback func(operation []string) (bool, error) // TODO: How does this work?
+	// INFO: defined in server scope
+	state_update_callback func(operation []string) error
 
 	status ServerStatus
 
@@ -45,14 +52,18 @@ type ConsensusModule struct {
 
 	log []LogEntry
 
-	commitQueue  chan<- struct{} // TODO: WTF?
-	commitResult <-chan error    // TODO: WTF?
+	commitQueue  chan struct{}
+	commitResult chan error
 
 	// INFO: each replicator sends info on this chan to signal entries replication
-	ackChan chan<- uint
+	// TODO: add flag (uint8) enum
+	ackChan chan struct {
+		idx  uint  // replicated index
+		flag uint8 // majority flag {0:old, 1:both, 2:new)}
+	}
 }
 
-func NewConsensusModule(callback func(op []string) (bool, error), config []string) *ConsensusModule {
+func NewConsensusModule(callback func(op []string) error, config []string) *ConsensusModule {
 	// TODO: proper initialization of CM
 	cm := ConsensusModule{}
 	cm.state_update_callback = callback
@@ -63,7 +74,7 @@ func NewConsensusModule(callback func(op []string) (bool, error), config []strin
 func (cm *ConsensusModule) Start() {
 	l, err := net.Listen("tcp", RAFT_PORT)
 	if err != nil {
-		fmt.Println(err) // FIXME: Shouldn't this panic?
+		panic(err.Error())
 	}
 	defer l.Close()
 
@@ -263,7 +274,7 @@ func getRandTimer(min, max int) (time.Duration, error) {
 	return d, nil
 }
 
-func (cm *ConsensusModule) StartElection() {
+func (cm *ConsensusModule) startElection() {
 	// TODO: add election timer check
 
 	d, err := getRandTimer(ELEC_TIMER_MIN, ELEC_TIMER_MAX)
@@ -401,6 +412,10 @@ func (cm *ConsensusModule) followerReplicator(cl *rpc.Client, newNode bool, ackC
 			} else {
 				// TODO: use buffer chan
 				ackChan <- followerIdx + 1
+
+				if !partOfBothCfgs {
+					ackChan <- []uint{followerIdx + 1}
+				}
 			}
 		}
 	}
@@ -411,22 +426,38 @@ func (cm *ConsensusModule) ConsensusTrackerLoop() {
 	confB := map[uint]uint{}
 
 	for true {
-		replicatedEntryID := <-cm.ackChan
+		data := <-cm.ackChan
 
-		// if ID never replicated
-		if _, ok := confA[replicatedEntryID]; !ok {
-			// create ID entry
-			confA[replicatedEntryID] = 1
-		} else {
-			// else increment counter
-			confA[replicatedEntryID]++
+		idx := data.idx
+
+		// create ID entry
+		if _, ok := confA[idx]; !ok {
+			confA[idx] = 0
+			confB[idx] = 0
 		}
 
-		if confA[replicatedEntryID] >= cm.commitQuorum && cm.commitIdx < replicatedEntryID {
-			cm.commitIdx = replicatedEntryID
+		// increment count for ID
+		switch data.flag {
+		case 0:
+			confA[idx]++
+		case 1:
+			confA[idx]++
+			confB[idx]++
+		case 2:
+			confB[idx]++
+
+		}
+
+		// check for majority replication
+		if confA[idx] >= cm.commitQuorum && uint(cm.commitIdx) < idx && (!intermediateConf() || confB[idx] >= cm.CommitQuorumB) {
+			cm.commitIdx = idx
 
 			// TODO: apply state change
-		}
+			err := cm.state_update_callback(cm.log[idx].command)
 
+			<-cm.commitQueue
+
+			cm.commitResult <- err
+		}
 	}
 }
