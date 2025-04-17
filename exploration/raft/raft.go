@@ -1,9 +1,7 @@
 package raft
 
 import (
-	"log"
 	"math/rand/v2"
-	"net"
 	"net/rpc"
 	"strconv"
 	"time"
@@ -51,12 +49,21 @@ type ConsensusModule struct {
 	commitResult chan error
 
 	// INFO: each replicator sends info on this chan to signal entries replication
-	// TODO: add flag (uint8) enum
-	ackChan chan struct {
-		idx  uint  // replicated index
-		flag uint8 // majority flag {0:old, 1:both, 2:new)}
-	}
+	ackChan chan replicationAck
 }
+
+type replicationAck struct {
+	idx  int        // replicated index
+	flag configType // majority flag (which majority to account the ack for)
+}
+
+type configType int
+
+const (
+	CONF_OLD configType = iota
+	CONF_INTERMEDIATE
+	CONF_NEW
+)
 
 func NewConsensusModule(callback func(op []string) error, config []string) *ConsensusModule {
 	// TODO: proper initialization of CM
@@ -286,12 +293,24 @@ func (cm *ConsensusModule) followerReplicator(cl *rpc.Client, newNode bool, ackC
 			if ret.state == RPC_CC_FAIL {
 				followerCommitIdx--
 			} else {
+
+				msg := replicationAck{
+					idx: followerIdx + 1,
+					// INFO: delelgated to CM state because it's dynamic and less efficient to propagate the change here
+					flag: cm.whichConfig(cl),
+				}
+
 				// TODO: use buffer chan
 				ackChan <- msg
-
 			}
 		}
 	}
+}
+
+func (cm *ConsensusModule) whichConfig(cl *rpc.Client) configType {
+	// TODO: tell which config a client is part of
+	// INFO: useful only in intermediate config
+	panic("unimplemented")
 }
 
 func (cm *ConsensusModule) ConsensusTrackerLoop() {
