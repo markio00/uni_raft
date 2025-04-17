@@ -39,9 +39,10 @@ type rpcResponseState int
 const (
 	RPC_CANT_VOTE rpcResponseState = iota
 	RPC_VOTED_ALREADY
-	RPC_CC_FAIL
 	RPC_VOTE_GRANTED
 	RPC_TERM_OUTDATED
+	RPC_NOT_UPTODATE
+	RPC_CC_FAIL
 )
 
 type RpcObject struct {
@@ -113,16 +114,19 @@ func (o *RpcObject) RequestVoteRPC(args RequestVoteRPCArgs, response *RPCRespons
 		return nil
 	}
 
-	// FIXME: C check is for append, RV_RPC grants vote if candidate has higher term  on last entry or same term and higher id on last entry than local (raft paper $ 5.4.1)
-	if !o.cm.ConsistencyCheck(int(args.cc_term), int(args.cc_idx)) {
-		// FIXME: not a consistency check (raft paper $ 5.4.1)
-		response.state = RPC_CC_FAIL
+	// INFO: Election restriction for Leader Completeness Property' (raft paper $ 5.4.1)
+	cc_entry := o.cm.log[len(o.cm.log)-1]
+	higherTerm := args.cc_term > cc_entry.term
+	higherIdx := args.cc_term == cc_entry.term && args.cc_idx > cc_entry.idx
+	if higherTerm || higherIdx {
+		// Vote
+		o.cm.votedFor = args.caller
+
+		response.state = RPC_VOTE_GRANTED
+
 	}
 
-	// Vote
-	o.cm.votedFor = args.caller
-
-	response.state = RPC_VOTE_GRANTED
+	response.state = RPC_NOT_UPTODATE
 
 	return nil
 }
