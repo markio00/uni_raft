@@ -91,8 +91,8 @@ func (o *RpcObject) AppendEntriesRPC(args AppendEntriesRPCArgs, response *RPCRes
 type RequestVoteRPCArgs struct {
 	caller string
 
-	cc_idx  uint
-	cc_term uint
+	cc_idx  int
+	cc_term int
 }
 
 func (o *RpcObject) RequestVoteRPC(args RequestVoteRPCArgs, response *RPCResponse) error {

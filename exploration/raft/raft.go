@@ -38,8 +38,8 @@ type ConsensusModule struct {
 
 	votedFor string // TODO: Should be an option type (nodes may not have yet voted)
 
-	currTerm uint
-	currIdx  uint
+	currTerm int
+	currIdx  int
 
 	commitIdx int // INFO: Index of highest log entry known to be committed
 
@@ -205,8 +205,8 @@ func (cm *ConsensusModule) startLeaderCycle() {
 	// TODO: heartbeats
 
 	noOpLogEntry := LogEntry{
-		term: int(cm.currTerm),
-		idx:  int(cm.currIdx),
+		term: cm.currTerm,
+		idx:  cm.currIdx,
 
 		command: []string{},
 	}
@@ -228,8 +228,8 @@ func (cm *ConsensusModule) replicateCommand(cmd []string) {
 	cm.currIdx++
 
 	cm.log = append(cm.log, LogEntry{
-		term:    int(cm.currTerm),
-		idx:     int(cm.currIdx),
+		term:    cm.currTerm,
+		idx:     cm.currIdx,
 		command: cmd,
 	})
 }
@@ -255,21 +255,22 @@ func (cm *ConsensusModule) startreplicationCycle() {
 	}
 }
 
-func (cm *ConsensusModule) followerReplicator(cl *rpc.Client, newNode bool, ackChan chan<- uint) {
-	// TODO: extend "nil idx" comcept to whole program
-	followerCommitIdx := new(uint)
-	*followerCommitIdx = uint(cm.commitIdx)
-	followerIdx := uint(0)
+func (cm *ConsensusModule) followerReplicator(cl *rpc.Client, newNode bool, ackChan chan<- replicationAck) {
+	followerCommitIdx := cm.commitIdx
+	followerIdx := -1
+
+	// FIX: move '*uint' hack to 'int'
+	// INFO: '*uint' too complex & hard to read. Efficiency gains not relevant at this time. Reverted to 'int'
 
 	for true {
 		// TODO: should probably be a locking channel
 		if canReplicate() {
 			args := &AppendEntriesRPCArgs{
-				term:    int(cm.currTerm),
+				term:    cm.currTerm,
 				cc_term: cm.log[followerIdx].term,
-				cc_idx:  int(followerIdx),
+				cc_idx:  followerIdx,
 				// TODO: allow entries bundle, fix appendEntriesRPC entries possible out of bounds
-				entries: []LogEntry{cm.log[int(followerIdx+1)]}, // : followerIdx+1+APPEND_ENTRIES_MAX_LOG_SLICE_LENGTH],
+				entries: []LogEntry{cm.log[followerIdx+1]}, // : followerIdx+1+APPEND_ENTRIES_MAX_LOG_SLICE_LENGTH],
 
 				leader_commit_idx: cm.commitIdx,
 			}
@@ -282,23 +283,20 @@ func (cm *ConsensusModule) followerReplicator(cl *rpc.Client, newNode bool, ackC
 				panic("couldn't call client RPC")
 			}
 
-			if ret.state == RV_RPC_C_CHECK_FAIL {
-				*followerCommitIdx--
+			if ret.state == RPC_CC_FAIL {
+				followerCommitIdx--
 			} else {
 				// TODO: use buffer chan
-				ackChan <- followerIdx + 1
+				ackChan <- msg
 
-				if !partOfBothCfgs {
-					ackChan <- []uint{followerIdx + 1}
-				}
 			}
 		}
 	}
 }
 
 func (cm *ConsensusModule) ConsensusTrackerLoop() {
-	confA := map[uint]uint{}
-	confB := map[uint]uint{}
+	confA := map[int]int{}
+	confB := map[int]int{}
 
 	for true {
 		data := <-cm.ackChan
@@ -324,7 +322,7 @@ func (cm *ConsensusModule) ConsensusTrackerLoop() {
 		}
 
 		// check for majority replication
-		if confA[idx] >= cm.commitQuorum && uint(cm.commitIdx) < idx && (!intermediateConf() || confB[idx] >= cm.CommitQuorumB) {
+		if confA[idx] >= cm.commitQuorum && cm.commitIdx < idx && (!intermediateConf() || confB[idx] >= cm.CommitQuorumB) {
 			cm.commitIdx = idx
 
 			// TODO: apply state change
