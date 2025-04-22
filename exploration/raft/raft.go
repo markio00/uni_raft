@@ -75,14 +75,14 @@ func NewConsensusModule(callback func(op []string) error, config []string) *Cons
 
 func (cm *ConsensusModule) canIVote() bool {
 	// TODO: determine if can vote
-	// INFO: can not vote if parat of new config but still syncing log
+	// INFO: can not vote if part of new config but still syncing log
 
 	// WARN: refactor
 	return true
 }
 
 func (cm *ConsensusModule) ConsistencyCheck(cc_term, cc_idx int) bool {
-	// TODO: perform log concsistency check
+	// TODO: perform log consistency check
 	// INFO: leader sends log UUID (term, idx). follower check if exist
 
 	// WARN: refactor
@@ -336,12 +336,12 @@ func (cm *ConsensusModule) ConsensusTrackerLoop() {
 
 		// increment count for ID
 		switch data.flag {
-		case 0:
+		case CONF_OLD:
 			confA[idx]++
-		case 1:
+		case CONF_INTERMEDIATE:
 			confA[idx]++
 			confB[idx]++
-		case 2:
+		case CONF_NEW:
 			confB[idx]++
 
 		}
