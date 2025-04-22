@@ -31,17 +31,17 @@ type ConsensusModule struct {
 
 	status ServerStatus
 
-	rpcSrv     rpc.Server
-	rpcClients map[string]*rpc.Client
+	rpcSrv     *rpc.Server
+	rpcClients []string
 
-	votedFor string // TODO: Should be an option type (nodes may not have yet voted)
+	votedFor string
 
 	currTerm int
 	currIdx  int
 
 	commitIdx int // INFO: Index of highest log entry known to be committed
 
-	electiontimer *time.Timer
+	electiontimer *time.Timer // INFO: timer init in 'startRpcSrv'
 
 	log []LogEntry
 
@@ -68,9 +68,25 @@ const (
 )
 
 func NewConsensusModule(callback func(op []string) error, config []string) *ConsensusModule {
-	// TODO: proper initialization of CM
 	cm := ConsensusModule{}
 	cm.state_update_callback = callback
+
+	cm.status = STATUS_FOLLOWER
+
+	cm.rpcSrv = rpc.NewServer()
+	cm.rpcClients = config
+
+	cm.votedFor = ""
+
+	cm.currTerm = 0
+	cm.currIdx = -1
+
+	cm.log = []LogEntry{}
+
+	cm.commitQueue = make(chan struct{})
+	cm.commitResult = make(chan error)
+
+	cm.ackChan = make(chan replicationAck)
 
 	cm.idleFlag = true
 
