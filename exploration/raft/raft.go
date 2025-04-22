@@ -94,19 +94,19 @@ func NewConsensusModule(callback func(op []string) error, config []string) *Cons
 }
 
 func (cm *ConsensusModule) ConsistencyCheck(cc_term, cc_idx int) bool {
-	// TODO: perform log consistency check
-	// INFO: leader sends log UUID (term, idx). follower check if exist
-
-	// WARN: refactor
-	return true
+	// INFO: check entry UUID (term, idx) exists in the log
+	return cc_idx < len(cm.log) && cm.log[cc_idx].term == cc_term
 }
 
 func (cm *ConsensusModule) termCheck(term int) bool {
-	// TODO: cm.term:  > term reject, if = term ok, if > term fall back to follower
 	// INFO: handle term difference
 
-	// WARN: refactor
-	return true
+	if term > cm.currTerm {
+		cm.currTerm = term
+		cm.status = STATUS_FOLLOWER
+	}
+
+	return term >= cm.currTerm
 }
 
 func (cm *ConsensusModule) appendLogEntries(cc_idx int, entries []LogEntry) {
@@ -131,8 +131,7 @@ func (cm *ConsensusModule) applyToState(leader_commit_idx int) error {
 		if entry.command[0] != "CC" {
 			err := cm.state_update_callback(entry.command)
 			if err != nil {
-				// TODO: handle state application error (hw / logic fault)
-				return nil
+				panic("HW error occurred: " + err.Error())
 			}
 		}
 	}
@@ -141,7 +140,8 @@ func (cm *ConsensusModule) applyToState(leader_commit_idx int) error {
 }
 
 func (cm *ConsensusModule) resetElectionTimer() {
-	// TODO: reset election timeout when received RPC
+	d := getRandTimer(ELEC_TIMER_MIN, ELEC_TIMER_MAX)
+	cm.electiontimer.Reset(d)
 }
 
 func (cm *ConsensusModule) apply_CC(cfg []string) {
@@ -163,25 +163,21 @@ const (
 	STATUS_LEADER
 )
 
-func getRandTimer(min, max int) (time.Duration, error) {
+func getRandTimer(min, max int) time.Duration {
 	randTime := rand.IntN(max-min) + min
 
 	d, err := time.ParseDuration(strconv.Itoa(randTime) + "ms")
 	if err != nil {
-		return 0, err // FIXME: Shouldn't panic?
+		panic("timer setup fail")
 	}
 
-	return d, nil
+	return d
 }
 
 func (cm *ConsensusModule) startElection() {
 	// TODO: add election timer check
 
-	d, err := getRandTimer(ELEC_TIMER_MIN, ELEC_TIMER_MAX)
-	if err != nil {
-		panic("timer setup fail")
-	}
-	cm.electiontimer.Reset(d)
+	cm.resetElectionTimer()
 
 	cm.status = STATUS_CANDIDATE
 	cm.currTerm++
