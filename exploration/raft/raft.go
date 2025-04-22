@@ -50,6 +50,8 @@ type ConsensusModule struct {
 
 	// INFO: each replicator sends info on this chan to signal entries replication
 	ackChan chan replicationAck
+
+	idleFlag bool
 }
 
 type replicationAck struct {
@@ -69,6 +71,8 @@ func NewConsensusModule(callback func(op []string) error, config []string) *Cons
 	// TODO: proper initialization of CM
 	cm := ConsensusModule{}
 	cm.state_update_callback = callback
+
+	cm.idleFlag = true
 
 	return &cm
 }
@@ -102,7 +106,7 @@ func (cm *ConsensusModule) appendLogEntries(cc_idx int, entries []LogEntry) {
 
 	// INFO: if received CC, apply it rightaway
 	for _, entry := range entries {
-		if entry.command[0] == "CC" {
+		if entry.command[0] == "CC" && !cm.idleFlag {
 			cm.apply_CC(entry.command[1:])
 		}
 	}

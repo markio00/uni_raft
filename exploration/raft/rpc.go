@@ -83,6 +83,10 @@ func (o *RpcObject) AppendEntriesRPC(args AppendEntriesRPCArgs, response *RPCRes
 
 	o.cm.appendLogEntries(args.cc_idx, args.entries)
 
+	if args.leader_commit_idx <= o.cm.currIdx { // IF up to date
+		o.cm.idleFlag = false
+	}
+
 	go o.cm.applyToState(args.leader_commit_idx)
 
 	return nil
@@ -104,10 +108,7 @@ func (o *RpcObject) RequestVoteRPC(args RequestVoteRPCArgs, response *RPCRespons
 		return nil
 	}
 
-	if !o.cm.canIVote() {
-		response.state = RPC_CANT_VOTE
-		return nil
-	}
+	// WARN: when node is added to the cluster, it has 'no cfg' when reaching commit level so that it does not interfeere until intermediat change entry is pushed
 
 	if o.cm.votedFor != "" {
 		response.state = RPC_VOTED_ALREADY
