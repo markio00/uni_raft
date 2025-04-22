@@ -31,15 +31,16 @@ type ConsensusModule struct {
 
 	status ServerStatus
 
-	rpcSrv     *rpc.Server
-	rpcClients []string
+	rpcSrv *rpc.Server
+
+	clients map[string]configType
 
 	votedFor string
 
 	currTerm int
 	currIdx  int
 
-	commitIdx int // INFO: Index of highest log entry known to be committed
+	commitIdx     int         // INFO: Index of highest log entry known to be committed
 	electiontimer *time.Timer // INFO: timer init in 'startRpcSrv'
 
 	log []LogEntry
@@ -66,6 +67,21 @@ const (
 	CONF_NEW
 )
 
+func (cm *ConsensusModule) sendRPC(ip string, rpcType string, args any, resp any) error {
+	// PERF: Using this function implies having a distinct client for each sent RPC
+	client, err := rpc.Dial("tcp", ip+RAFT_PORT)
+	if err != nil {
+		return err
+	}
+	defer client.Close()
+	// INFO: resp is already sent as a pointer by whoever calls `SendRPC`
+	err = client.Call(rpcType, args, resp)
+	if err != nil {
+		return err
+	}
+	return nil
+}
+
 func NewConsensusModule(callback func(op []string) error, config []string) *ConsensusModule {
 	cm := ConsensusModule{}
 	cm.state_update_callback = callback
@@ -73,7 +89,10 @@ func NewConsensusModule(callback func(op []string) error, config []string) *Cons
 	cm.status = STATUS_FOLLOWER
 
 	cm.rpcSrv = rpc.NewServer()
-	cm.rpcClients = config
+
+	for _, ip := range config {
+		cm.clients[ip] = CONF_NEW
+	}
 
 	cm.votedFor = ""
 
@@ -147,6 +166,22 @@ func (cm *ConsensusModule) resetElectionTimer() {
 
 func (cm *ConsensusModule) apply_CC(cfg []string) {
 	// TODO: change running config and apply
+
+	if cm.status == STATUS_FOLLOWER {
+		for ip := range cm.clients {
+			cm.clients[ip] = CONF_OLD
+		}
+		for _, ip := range cfg {
+			_, ok := cm.clients[ip]
+			if ok {
+				cm.clients[ip] = CONF_INTERMEDIATE
+			} else {
+				cm.clients[ip] = CONF_NEW
+			}
+		}
+	} else if cm.status == STATUS_LEADER {
+		// TODO: Bring new clients to commit level
+	}
 }
 
 type LogEntry struct {
@@ -190,11 +225,11 @@ func (cm *ConsensusModule) startElection() {
 
 	resultChan := make(chan bool, 0)
 
-	for k := range cm.rpcClients {
+	for ip := range cm.clients {
 		go func(resChan chan<- bool) {
 			args := RequestVoteRPCArgs{}
 			resp := RPCResponse{}
-			cm.rpcClients[k].Call("RpcObject.RequestVoteRPC", args, &resp) // TODO: Wrap `Call` inside a function which has the client id as a parameter 
+			cm.sendRPC(ip, "RpcObject.RequestVoteRPC", args, &resp)
 
 			// WARN: we explicitely decided not to implement a different retry timeout (from the election timer)
 
@@ -202,7 +237,7 @@ func (cm *ConsensusModule) startElection() {
 		}(resultChan)
 	}
 
-	quota := (((len(cm.rpcClients) + 1) / 2) + 1)
+	quota := (((len(cm.clients) + 1) / 2) + 1)
 	// while quota(1/2 +1) not met
 	for elecCounter < quota && (respCounter-elecCounter) <= quota {
 		elecRes := <-resultChan
@@ -261,9 +296,9 @@ func (cm *ConsensusModule) startHeartbeatCycle() {
 	hbTimer := time.NewTimer(d)
 
 	for {
-		for _, client := range cm.rpcClients {
+		for ip := range cm.clients {
 			go func() {
-				client.Call("RpcObject.AppendEntriesRPC", AppendEntriesRPCArgs{}, &RPCResponse{}) // TODO: Wrap `Call` inside a function which has the client id as a parameter 
+				cm.sendRPC(ip, "RpcObject.AppendEntriesRPC", AppendEntriesRPCArgs{}, &RPCResponse{})
 			}()
 		}
 
@@ -272,21 +307,20 @@ func (cm *ConsensusModule) startHeartbeatCycle() {
 }
 
 func (cm *ConsensusModule) startreplicationCycle() {
-	for _, client := range cm.rpcClients {
-		go cm.followerReplicator(client)
+	for _, client := range cm.clients {
+		// TODO: go cm.followerReplicator(...)
 	}
 }
 
-func (cm *ConsensusModule) followerReplicator(cl *rpc.Client, newNode bool, ackChan chan<- replicationAck) {
+func (cm *ConsensusModule) followerReplicator(cl string, newNode bool, ackChan chan<- replicationAck) {
 	followerCommitIdx := cm.commitIdx
 	followerIdx := -1
 
-	// FIX: move '*uint' hack to 'int'
 	// INFO: '*uint' too complex & hard to read. Efficiency gains not relevant at this time. Reverted to 'int'
 
 	for true {
 		// TODO: should probably be a locking channel
-		if canReplicate() {
+		if areThereNewEntries() {
 			args := &AppendEntriesRPCArgs{
 				term:    cm.currTerm,
 				cc_term: cm.log[followerIdx].term,
@@ -298,11 +332,10 @@ func (cm *ConsensusModule) followerReplicator(cl *rpc.Client, newNode bool, ackC
 			}
 
 			ret := RPCResponse{}
-			err := cl.Call("RpcObject.AppendEntrieRPC", args, &ret) // TODO: Wrap `Call` inside a function which has the client id as a parameter 
+			err := cm.sendRPC(cl, "RpcObject.AppendEntriesRPC", args, &ret)
 			if err != nil {
-				// FIXME: communicate client ID
 				// TODO: should probably retry
-				panic("couldn't call client RPC")
+				panic("couldn't call client #" + cl + " RPC")
 			}
 
 			if ret.state == RPC_CC_FAIL {
@@ -312,20 +345,14 @@ func (cm *ConsensusModule) followerReplicator(cl *rpc.Client, newNode bool, ackC
 				msg := replicationAck{
 					idx: followerIdx + 1,
 					// INFO: delelgated to CM state because it's dynamic and less efficient to propagate the change here
-					flag: cm.whichConfig(cl),
+					flag: cm.clients[cl],
 				}
 
-				// TODO: use buffer chan
+				// TODO: use buffered chan
 				ackChan <- msg
 			}
 		}
 	}
-}
-
-func (cm *ConsensusModule) whichConfig(cl *rpc.Client) configType {
-	// TODO: tell which config a client is part of
-	// INFO: useful only in intermediate config
-	panic("unimplemented")
 }
 
 func (cm *ConsensusModule) ConsensusTrackerLoop() {
