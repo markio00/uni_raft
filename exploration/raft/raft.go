@@ -93,14 +93,6 @@ func NewConsensusModule(callback func(op []string) error, config []string) *Cons
 	return &cm
 }
 
-func (cm *ConsensusModule) canIVote() bool {
-	// TODO: determine if can vote
-	// INFO: can not vote if part of new config but still syncing log
-
-	// WARN: refactor
-	return true
-}
-
 func (cm *ConsensusModule) ConsistencyCheck(cc_term, cc_idx int) bool {
 	// TODO: perform log consistency check
 	// INFO: leader sends log UUID (term, idx). follower check if exist
