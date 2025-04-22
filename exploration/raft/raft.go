@@ -40,7 +40,6 @@ type ConsensusModule struct {
 	currIdx  int
 
 	commitIdx int // INFO: Index of highest log entry known to be committed
-
 	electiontimer *time.Timer // INFO: timer init in 'startRpcSrv'
 
 	log []LogEntry
@@ -80,6 +79,8 @@ func NewConsensusModule(callback func(op []string) error, config []string) *Cons
 
 	cm.currTerm = 0
 	cm.currIdx = -1
+
+	cm.commitIdx = -1
 
 	cm.log = []LogEntry{}
 
@@ -193,7 +194,7 @@ func (cm *ConsensusModule) startElection() {
 		go func(resChan chan<- bool) {
 			args := RequestVoteRPCArgs{}
 			resp := RPCResponse{}
-			cm.rpcClients[k].Call("RpcObject.RequestVoteRPC", args, &resp)
+			cm.rpcClients[k].Call("RpcObject.RequestVoteRPC", args, &resp) // TODO: Wrap `Call` inside a function which has the client id as a parameter 
 
 			// WARN: we explicitely decided not to implement a different retry timeout (from the election timer)
 
@@ -262,7 +263,7 @@ func (cm *ConsensusModule) startHeartbeatCycle() {
 	for {
 		for _, client := range cm.rpcClients {
 			go func() {
-				client.Call("RpcObject.AppendEntriesRPC", AppendEntriesRPCArgs{}, &RPCResponse{})
+				client.Call("RpcObject.AppendEntriesRPC", AppendEntriesRPCArgs{}, &RPCResponse{}) // TODO: Wrap `Call` inside a function which has the client id as a parameter 
 			}()
 		}
 
@@ -297,7 +298,7 @@ func (cm *ConsensusModule) followerReplicator(cl *rpc.Client, newNode bool, ackC
 			}
 
 			ret := RPCResponse{}
-			err := cl.Call("RpcObject.AppendEntrieRPC", args, &ret)
+			err := cl.Call("RpcObject.AppendEntrieRPC", args, &ret) // TODO: Wrap `Call` inside a function which has the client id as a parameter 
 			if err != nil {
 				// FIXME: communicate client ID
 				// TODO: should probably retry
