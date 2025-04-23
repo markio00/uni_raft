@@ -19,10 +19,7 @@ func (cm *ConsensusModule) startRpcServer() {
 
 	log.Println("Listening RPCs on port", RAFT_PORT)
 
-	d, err := getRandTimer(ELEC_TIMER_MIN, ELEC_TIMER_MAX)
-	if err != nil {
-		panic("timer setup fail")
-	}
+	d := getRandTimer(ELEC_TIMER_MIN, ELEC_TIMER_MAX)
 	cm.electiontimer = time.AfterFunc(d, cm.startElection)
 
 	for {
