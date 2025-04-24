@@ -9,7 +9,7 @@ import (
 
 func assert(cond bool, msg string) {
 	if !cond {
-		panic(msg)
+		panic("Assertion " + msg + " failed")
 	}
 }
 
@@ -33,7 +33,7 @@ type ConsensusModule struct {
 
 	rpcSrv *rpc.Server
 
-	clients map[string]configType
+	clients map[string]configType // INFO: All nodes in the cluster except me
 
 	votedFor string
 
@@ -313,6 +313,9 @@ func (cm *ConsensusModule) startreplicationCycle() {
 }
 
 func (cm *ConsensusModule) followerReplicator(cl string, newNode bool, ackChan chan<- replicationAck) {
+
+	// TODO: wait time for RPC should be bounded
+
 	followerCommitIdx := cm.commitIdx
 	followerIdx := -1
 
@@ -372,14 +375,13 @@ func (cm *ConsensusModule) ConsensusTrackerLoop() {
 
 		// increment count for ID
 		switch data.flag {
-		case CONF_OLD:
-			confA[idx]++
-		case CONF_INTERMEDIATE:
-			confA[idx]++
-			confB[idx]++
-		case CONF_NEW:
-			confB[idx]++
-
+			case CONF_OLD:
+				confA[idx]++
+			case CONF_INTERMEDIATE:
+				confA[idx]++
+				confB[idx]++
+			case CONF_NEW:
+				confB[idx]++
 		}
 
 		// check for majority replication

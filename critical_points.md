@@ -29,6 +29,7 @@
 1. Come codificare la condizione che un nodo, dopo avere inviato una serie di richieste in parallelo, debba sì attendere le risposte ma solo entro un certo limite di tempo?
 1. Se un server S riceve N chiamate di procedura remota, queste N vengono eseguite in maniera concorrente o FIFO? Nel primo caso bisogna prestare attenzione alle corse critiche sullo stato di S, dovute alle N chiamate parallele. RISOLTO: in maniera concorrente.
 1. Bisogna fare in modo di gestire le richieste del client in modo che arrivino un minimo distanziate (evitando DOS)
+1. E se per gestire il cambio di configurazione ci fosse una goroutine a parte che si sincronizza con il ConsensusTrackerLoop?
 
 # Approcci alla gestione delle richieste durante il ciclo di vita del leader
 
@@ -45,6 +46,3 @@ Scelto per "separation of concerns".
 > Lo scope delle goroutine è vincolato alla durata di vita del main.
 >
 > Ecco perchè serve sincronizzarsi con canali e/o wait group.
-
-# Da dove si riparte?
-Dal conteggio di maggioranze distinte

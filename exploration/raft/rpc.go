@@ -40,6 +40,7 @@ const (
 	RPC_TERM_OUTDATED
 	RPC_NOT_UPTODATE
 	RPC_CC_FAIL
+	RPC_HEARTBEAT_RECEIVED
 )
 
 type RpcObject struct {
@@ -67,9 +68,8 @@ func (o *RpcObject) AppendEntriesRPC(args AppendEntriesRPCArgs, response *RPCRes
 		return nil
 	}
 
-	// INFO: is Heartbeat?
-	if len(args.entries) == 0 {
-		// TODO: respond 'HB received' to caller
+	if len(args.entries) == 0 { // INFO: is heartbeat?
+		response.state = RPC_HEARTBEAT_RECEIVED
 		return nil
 	}
 
@@ -80,7 +80,7 @@ func (o *RpcObject) AppendEntriesRPC(args AppendEntriesRPCArgs, response *RPCRes
 
 	o.cm.appendLogEntries(args.cc_idx, args.entries)
 
-	if args.leader_commit_idx <= o.cm.currIdx { // IF up to date
+	if args.leader_commit_idx <= o.cm.currIdx { // INFO: Is my log up to date?
 		o.cm.idleFlag = false
 	}
 
