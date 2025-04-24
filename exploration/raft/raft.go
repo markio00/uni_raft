@@ -52,6 +52,12 @@ type ConsensusModule struct {
 	ackChan chan replicationAck
 
 	idleFlag bool
+
+	commitQuorum int
+	
+	commitQuorumB int
+
+	didBringNewNodesToCommitLevel chan struct{}
 }
 
 type replicationAck struct {
@@ -110,6 +116,10 @@ func NewConsensusModule(callback func(op []string) error, config []string) *Cons
 
 	cm.idleFlag = true
 
+	cm.commitQuorum = (len(config) / 2) + 1
+
+	cm.commitQuorumB = -1
+
 	return &cm
 }
 
@@ -153,6 +163,7 @@ func (cm *ConsensusModule) applyToState(leader_commit_idx int) error {
 			if err != nil {
 				panic("HW error occurred: " + err.Error())
 			}
+		} else {
 		}
 	}
 
@@ -165,7 +176,8 @@ func (cm *ConsensusModule) resetElectionTimer() {
 }
 
 func (cm *ConsensusModule) apply_CC(cfg []string) {
-	// TODO: change running config and apply
+
+	cm.commitQuorumB = (len(cfg) / 2) + 1
 
 	if cm.status == STATUS_FOLLOWER {
 		for ip := range cm.clients {
@@ -180,7 +192,21 @@ func (cm *ConsensusModule) apply_CC(cfg []string) {
 			}
 		}
 	} else if cm.status == STATUS_LEADER {
-		// TODO: Bring new clients to commit level
+	
+		for _, client_in_new_configuration := range cfg {
+			if _, ok := cm.clients[client_in_new_configuration] ; !ok {
+				go cm.followerReplicator(client_in_new_configuration)
+			}
+		}
+
+		// PERF: Use a waitgroup 
+		for _, client_in_new_configuration := range cfg {
+			if _, ok := cm.clients[client_in_new_configuration] ; !ok {
+				<- cm.didBringNewNodesToCommitLevel
+			}
+		}
+
+		cm.replicateCommand(append([]string{"CFG"}, cfg...))
 	}
 }
 
@@ -270,14 +296,18 @@ func (cm *ConsensusModule) startLeaderCycle() {
 }
 
 func (cm *ConsensusModule) CommitEntry(cmd []string) error {
-	cm.replicateCommand(cmd)
+
+	if cmd[0] == "CC" {
+		cm.apply_CC(cmd[1:])	
+	} else {
+		cm.replicateCommand(cmd)
+	}
 
 	cm.commitQueue <- struct{}{}
 	err := <-cm.commitResult
 	if err != nil {
 		return err
 	}
-
 	return nil
 }
 
@@ -307,12 +337,12 @@ func (cm *ConsensusModule) startHeartbeatCycle() {
 }
 
 func (cm *ConsensusModule) startreplicationCycle() {
-	for _, client := range cm.clients {
-		// TODO: go cm.followerReplicator(...)
+	for client, _ := range cm.clients {
+		go cm.followerReplicator(client)
 	}
 }
 
-func (cm *ConsensusModule) followerReplicator(cl string, newNode bool, ackChan chan<- replicationAck) {
+func (cm *ConsensusModule) followerReplicator(cl string) {
 
 	// TODO: wait time for RPC should be bounded
 	/* Maybe this behaviour can be achieved by using a `select` over two channels:
@@ -323,40 +353,46 @@ func (cm *ConsensusModule) followerReplicator(cl string, newNode bool, ackChan c
 	followerCommitIdx := cm.commitIdx
 	followerIdx := -1
 
+	isNewNode := true
+
 	// INFO: '*uint' too complex & hard to read. Efficiency gains not relevant at this time. Reverted to 'int'
 
-	for true {
-		// TODO: should probably be a locking channel
-		if areThereNewEntries() {
-			args := &AppendEntriesRPCArgs{
-				term:    cm.currTerm,
-				cc_term: cm.log[followerIdx].term,
-				cc_idx:  followerIdx,
-				// TODO: allow entries bundle, fix appendEntriesRPC entries possible out of bounds
-				entries: []LogEntry{cm.log[followerIdx+1]}, // : followerIdx+1+APPEND_ENTRIES_MAX_LOG_SLICE_LENGTH],
+	for {
+		// TODO: Check if you can send entries to this follower
+		// Prepare AppendEntries Arg
+		args := &AppendEntriesRPCArgs{
+			term:    cm.currTerm,
+			cc_term: cm.log[followerIdx].term,
+			cc_idx:  followerIdx,
+			// TODO: allow entries bundle, fix appendEntriesRPC entries possible out of bounds
+			entries: []LogEntry{cm.log[followerIdx+1]}, // : followerIdx+1+APPEND_ENTRIES_MAX_LOG_SLICE_LENGTH],
 
-				leader_commit_idx: cm.commitIdx,
+			leader_commit_idx: cm.commitIdx,
+		}
+
+		ret := RPCResponse{}
+		err := cm.sendRPC(cl, "RpcObject.AppendEntriesRPC", args, &ret)
+		if err != nil {
+			// TODO: should probably retry
+			panic("couldn't call client #" + cl + " RPC")
+		}
+
+		if ret.state == RPC_CC_FAIL {
+			followerCommitIdx--
+		} else {
+
+			if isNewNode && followerCommitIdx == cm.commitIdx {
+				isNewNode = false
+				cm.didBringNewNodesToCommitLevel <- struct{}{}
 			}
 
-			ret := RPCResponse{}
-			err := cm.sendRPC(cl, "RpcObject.AppendEntriesRPC", args, &ret)
-			if err != nil {
-				// TODO: should probably retry
-				panic("couldn't call client #" + cl + " RPC")
-			}
-
-			if ret.state == RPC_CC_FAIL {
-				followerCommitIdx--
-			} else {
-
+			if ! isNewNode {
 				msg := replicationAck{
 					idx: followerIdx + 1,
 					// INFO: delelgated to CM state because it's dynamic and less efficient to propagate the change here
 					flag: cm.clients[cl],
 				}
-
-				// TODO: use buffered chan
-				ackChan <- msg
+				cm.ackChan <- msg // PERF: use buffered chan
 			}
 		}
 	}
@@ -389,14 +425,18 @@ func (cm *ConsensusModule) ConsensusTrackerLoop() {
 		}
 
 		// check for majority replication
-		if confA[idx] >= cm.commitQuorum && cm.commitIdx < idx && (!intermediateConf() || confB[idx] >= cm.CommitQuorumB) {
+		if confA[idx] >= cm.commitQuorum && cm.commitIdx < idx && (!cm.isIntermediateConf() || confB[idx] >= cm.commitQuorumB) {
 			cm.commitIdx = idx
 
-			// TODO: apply state change
 			err := cm.applyToState(idx)
 			<-cm.commitQueue
 
 			cm.commitResult <- err
 		}
 	}
+}
+
+func (cm *ConsensusModule) isIntermediateConf() bool {
+	
+	return cm.commitQuorumB == -1
 }
