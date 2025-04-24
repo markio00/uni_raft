@@ -315,6 +315,10 @@ func (cm *ConsensusModule) startreplicationCycle() {
 func (cm *ConsensusModule) followerReplicator(cl string, newNode bool, ackChan chan<- replicationAck) {
 
 	// TODO: wait time for RPC should be bounded
+	/* Maybe this behaviour can be achieved by using a `select` over two channels:
+	   1. One to receive the RPC result
+		 2. The other to receive a signal from a timer
+	*/
 
 	followerCommitIdx := cm.commitIdx
 	followerIdx := -1
