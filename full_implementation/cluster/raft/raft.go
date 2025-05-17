@@ -1,6 +1,7 @@
 package raft
 
 import (
+	"errors"
 	"math/rand"
 	"net/rpc"
 	"sync"
@@ -30,10 +31,6 @@ type (
 	Command       []string
 	Configuration []string
 	NodeID        string
-	Connection    struct {
-		NodeID
-		*rpc.Client
-	}
 )
 
 type ConsensusModule struct {
@@ -59,8 +56,8 @@ type ConsensusModule struct {
 	votedFor         NodeID
 
 	// Communication with action handler goroutine
-	cliComRequests  chan Command
-	cliComResponses chan error
+	cliCmdRequests  chan Command
+	cliCmdResponses chan error
 
 	// Signaling for leader configuration change
 	configChanges chan Command
@@ -73,10 +70,79 @@ type ConsensusModule struct {
 	commitChan chan int // send index to commit
 }
 
+/*
+ * Public Interface
+ */
+
+// Public interface for users of the Raft Module
 type CMOuterInterface interface {
 	NewRaftInstance(cfg Configuration) CMOuterInterface
 	Start()
 	ApplyCommand(cmd Command)
+}
+
+// TODO: write Setup function
+
+// Starts all the control threads, timed events and connections
+func (cm *ConsensusModule) Start() {
+	// Start connection manager
+	go cm.connectionManager()
+
+	// Initialise new connections
+	for _, node := range cm.newConfig {
+		cm.newConnChan <- node
+	}
+	cm.newConfig = []NodeID{}
+
+	// Start election timer
+	cm.electionTimer = *time.AfterFunc(getRandomDuration(ELEC_TIMER_MIN, ELEC_TIMER_MAX), cm.startElection)
+
+	// TODO: start rpc server
+	// TODO: start client cmd handler
+
+	// TODO: start all handlers
+
+	// TODO: implement duty cycle
+}
+
+// Aplies the given command to the distributed cluster
+// The call blocks until the command is committed to the cluster returning a nil
+// If the current node is not the leader, an error redirecting to the correct leader will be returned
+// In exceptional circumstances when committing fails, an explainative error will be returned instead
+func (cm *ConsensusModule) ApplyCommand(cmd Command) error {
+	cm.mu.Lock()
+	if cm.nodeStatus != LEADER {
+		// If the node is not the leader, send an error specifying the correct leader
+		cm.mu.Unlock()
+		// FIX: should be discrete error type
+		return errors.New("Not the leader, contact " + string(cm.votedFor))
+	}
+	cm.mu.Unlock()
+
+	cm.cliCmdRequests <- cmd
+	response := <-cm.cliCmdResponses
+	// TODO: add leader logic
+
+	return response
+}
+
+// receives commands from clients and starts the replication process
+func (cm *ConsensusModule) replicationHandler() {
+	for {
+		cmd := <-cm.cliCmdRequests
+		cm.mu.Lock()
+		cm.currentIdx++
+		entry := logEntry{
+			idx:  cm.currentIdx,
+			term: cm.currentTerm,
+			cmd:  Command(cmd),
+		}
+
+		cm.mu.Unlock()
+	}
+}
+
+func (cm *ConsensusModule) commitHandler() {
 }
 
 /*
@@ -116,6 +182,8 @@ func (cm *ConsensusModule) ResetElectionTimer() {
 func (cm *ConsensusModule) ConsistencyCheck(ccIdx, ccTerm int) bool {
 	// WARN: if executing appendEntries concurrently, another log may be appended between consistency check and actual appending
 	lastEntry := cm.log[len(cm.log)-1]
+
+	// FIX: delete entries if no match ??
 
 	return lastEntry.idx == ccIdx && lastEntry.term == ccTerm
 }
@@ -169,13 +237,11 @@ func (cm *ConsensusModule) VoteFor(candidateID NodeID) bool {
 }
 
 /*
- * Configuration Change
+ * Configuration Change Logic
  */
 
 // Apply the configuratino change to a receiving follower
 func (cm *ConsensusModule) applyFollowerConfigChange(cfg Configuration) {
-	// TODO: apply received config change to follower
-
 	defer cm.mu.Unlock()
 	cm.mu.Lock()
 
@@ -222,7 +288,21 @@ func (cm *ConsensusModule) applyFollowerConfigChange(cfg Configuration) {
 				cm.delConnChan <- NodeID(oldNode)
 			}
 		}
+
+		// reset intermediate config fields
+		cm.oldConfig = []NodeID{}
+		cm.newConfig = []NodeID{}
+		cm.isIntermediateConfig = false
 	}
+}
+
+/*
+ * Election Logic
+ */
+
+func (cm *ConsensusModule) startElection() {
+	// TODO: implement eletion logic
+	panic("IMPLEMENT ConsensusModule.startElection()")
 }
 
 /*
