@@ -28,10 +28,10 @@ type logEntry struct {
 }
 
 type (
-	Command        []string
-	Configuration  []string
-	NodeID         string
-	ReplicationAck struct {
+	Command        = []string
+	Configuration  = []string
+	NodeID         = string
+	ReplicationAck = struct {
 		id  NodeID
 		idx int
 	}
@@ -182,7 +182,7 @@ func (cm *ConsensusModule) replicatorWorker(node NodeID, newLogsAvailable chan s
 		result := true // make request
 		if result {
 			hostIdx = replicationIdx
-			cm.replicationAckChan <- RepicationAck{
+			cm.replicationAckChan <- ReplicationAck{
 				id:  node,
 				idx: replicationIdx,
 			}
@@ -207,35 +207,86 @@ func (cm *ConsensusModule) replicatorWorker(node NodeID, newLogsAvailable chan s
 }
 
 func (cm *ConsensusModule) consensusTrackerLoop() {
-	replicationLedger := map[int][]int{} // map[log idx] ack nr
+
+	initializedIntermediateConfig := false
+	destroyedIntermediateConfig := true
+	replicationLedger := map[int][][]NodeID{} // maps log index to two-sized arrays
+
+	// each two-sized array stores an array of the ips which have replicated the log index
 
 	for {
 		// Unlocks when an entry is replicated successfuly to one node
 		ack := <-cm.replicationAckChan
 
+		// if this is the first iteration where the curr. intermediate conf. is being used...
+		if cm.isIntermediateConfig && !initializedIntermediateConfig {
+			initializedIntermediateConfig = true
+			destroyedIntermediateConfig = false
+			// add to the list of nodes in the new config. which have replicated the log entry
+			// all the nodes (also) in the old configuration which have already replicated it
+			for k, _ := range replicationLedger {
+				replicationLedger[k][1] = sliceFilterIn(replicationLedger[k][0], cm.newConfig)
+			}
+		}
+
+		// if this is the first iteration since you started to consider only the new conf after an intermediate configuration phase ended...
+		if !cm.isIntermediateConfig && !destroyedIntermediateConfig {
+
+			// ... forget about intermediate configuration
+			initializedIntermediateConfig = false
+			destroyedIntermediateConfig = true
+			
+			for k, _ := range replicationLedger {
+				replicationLedger[k][0] = replicationLedger[k][1]
+				replicationLedger[k][1] = []NodeID{}
+			}
+		}
+
+		// If entry is already committed, discard ack
+		if ack.idx <= cm.commitIdx {
+			continue
+		}
+
+		// if the entry has never been replicated, initialize
 		if _, ok := replicationLedger[ack.idx]; !ok {
-			// if the entry has never been replicated, initialize
-			replicationLedger[ack.idx] = []int{0, 0}
-			if !cm.isIntermediateConfig || sliceContains(cm.oldConfig, ack.id) {
-				replicationLedger[ack.idx][0] = 1
-			}
 
-			if cm.isIntermediateConfig && sliceContains(cm.newConfig, ack.id) {
-				replicationLedger[ack.idx][1] = 1
+			replicationLedger[ack.idx] = [][]NodeID{}
+			replicationLedger[ack.idx][0] = []NodeID{}
+
+			if cm.isIntermediateConfig {
+				replicationLedger[ack.idx][1] = []NodeID{}
 			}
+		}
+
+		// if no intermediate config. is in progress or if the ack sender is part of the old config...
+		if !cm.isIntermediateConfig || sliceContains(cm.oldConfig, ack.id) {
+			// add ack sender's id to the list of nodes in the old config.  which have replicated the log entry
+			replicationLedger[ack.idx][0] = append(replicationLedger[ack.idx][0], ack.id)
+		}
+
+		// if intermediate config. is in progress and the ack sender is part of the new config...
+		if cm.isIntermediateConfig && sliceContains(cm.newConfig, ack.id) {
+			// add ack sender's id to the list of nodes in the new config.  which have replicated the log entry
+			replicationLedger[ack.idx][1] = append(replicationLedger[ack.idx][1], ack.id)
+		}
+
+		isQuorumReached := false;
+
+		if !cm.isIntermediateConfig {
+			standardQuorum := len(filterOut(cm.clusterConfiguration, cm.nonVotingNodes))/2 + 1
+			isQuorumReached = len(replicationLedger[ack.idx][0]) == standardQuorum
 		} else {
-			// update it otherwise
-			replicationLedger[ack.idx] = replicationLedger[ack.idx] + 1
+			isQuorumReached = len(replicationLedger[ack.idx][0]) == (len(cm.oldConfig)/2 + 1) // consider old majority
+			isQuorumReached = isQuorumReached && len(replicationLedger[ack.idx][1]) == (len(cm.newConfig)/2 + 1) // consider new majority
 		}
 
-		// if quota reached for the first time; cm.commitChan <- ack.idx
-		if true {
-			if isintermediateConfig && cm.log[ack.idx].cmd[0] == "CC" {
+		// if quorum for log idx is reached ; cm.commitChan <- ack.idx
+		if isQuorumReached {
+			if cm.isIntermediateConfig && cm.log[ack.idx].cmd[0] == "CC" {
 				// start phase 2
-				go applyLeaderConfigChangePhase2()
+				go cm.applyLeaderConfigChangePhase2()
 			}
 		}
-
 	}
 }
 
@@ -430,7 +481,7 @@ func (cm *ConsensusModule) applyLeaderConfigCange(cfg Configuration) {
 	entry := logEntry{
 		idx:  cm.currentIdx,
 		term: cm.currentTerm,
-		cmd:  Command{"CC", "IC", cfg[1:]},
+		cmd: append([]string{"CC", "IC"}, cfg[1:]...),
 	}
 	cm.log = append(cm.log, entry)
 
@@ -447,11 +498,11 @@ func (cm *ConsensusModule) applyLeaderConfigChangePhase2() {
 	entry := logEntry{
 		idx:  cm.currentIdx,
 		term: cm.currentTerm,
-		cmd:  Command{"CC", "NC", cfg[1:]},
+		cmd: append([]string{"CC", "NC"}, cm.newConfig...),
 	}
 	cm.log = append(cm.log, entry)
 
-	// TODO: chang eocnfig cinfastructure to new ocnfig
+	// TODO: chang config infastructure to new config
 
 	// if not leader anymore (not in new config)
 	cm.nodeStatus = FOLLOWER
@@ -528,6 +579,17 @@ func filterIn[K comparable, V any](m map[K]V, keys []K) (res map[K]V) {
 	for k, v := range m {
 		if sliceContains(keys, k) {
 			res[k] = v
+		}
+	}
+
+	return res
+}
+
+// Filters slice values in the filter array
+func sliceFilterIn[T comparable](slice []T, filter []T) (res []T) {
+	for _, v := range slice {
+		if sliceContains(filter, v) {
+			res = append(res, v)
 		}
 	}
 
