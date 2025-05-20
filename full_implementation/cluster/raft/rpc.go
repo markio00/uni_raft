@@ -72,6 +72,7 @@ type RequestVoteResponse struct {
 
 func (obj *RpcObject) RequestVoteRPC(args RequestVoteArgs, resp *RequestVoteResponse) error {
 	obj.cm.ResetElectionTimer()
+
 	if !obj.cm.HandleTerm(args.term, "") {
 		resp.termTooLow = true
 		return nil

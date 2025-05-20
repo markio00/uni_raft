@@ -57,7 +57,7 @@ func (cm *ConsensusModule) connectNode(ip NodeID) {
 		defer cancel()
 
 		// Send a warning if connection takes long
-		time.AfterFunc(RPC_CONN_WARN_TIMEOUT, func() {
+		warnTimer := time.AfterFunc(RPC_CONN_WARN_TIMEOUT, func() {
 			slog.Warn("Server %v unresponsive after %v", ip, RPC_CONN_WARN_TIMEOUT)
 		})
 
@@ -66,6 +66,7 @@ func (cm *ConsensusModule) connectNode(ip NodeID) {
 		if err == nil {
 			// if conn successful delete context and add client to the configuration
 			slog.Info("Connection to server %v successful", ip)
+			warnTimer.Stop()
 			cm.mu.Lock()
 			cm.clusterConfiguration[ip] = rpc.NewClient(conn)
 			cm.mu.Unlock()
@@ -75,13 +76,6 @@ func (cm *ConsensusModule) connectNode(ip NodeID) {
 		// if timeout or conn err occurrs, log it and cancel the context
 		slog.Warn("Couldn't connect to %v: %v", ip, err)
 		cancel()
-
-		// exit after 10 attempts
-		// WARN: should probably retry indefinitely since it may get back online
-		if attempts >= 10 {
-			slog.Error("Stopping eonn attempts for %v after 10 attempts", ip)
-			return // errors.New("too many attempts")
-		}
 
 		// wait for retry timer
 		// - if runs out before conn timeout won't be blocking
