@@ -17,8 +17,9 @@ const (
 )
 
 const (
-	ELEC_TIMER_MIN = 500 * time.Millisecond
-	ELEC_TIMER_MAX = 800 * time.Millisecond
+	ELEC_TIMER_MIN  = 500 * time.Millisecond
+	ELEC_TIMER_MAX  = 800 * time.Millisecond
+	HEARTBEAT_DELAY = 100 * time.Millisecond
 )
 
 type logEntry struct {
@@ -72,8 +73,9 @@ type ConsensusModule struct {
 	delConnChan chan NodeID // delete old connections
 
 	// Communication with commit handler goroutine
-	replicationAckChan chan ReplicationAck
-	commitChan         chan int // send index to commit
+	replicationAckChan   chan ReplicationAck
+	commitChan           chan int // send index to commit
+	newVotingMembersChan chan NodeID
 }
 
 /*
@@ -103,6 +105,9 @@ func (cm *ConsensusModule) Start() {
 	// Start election timer
 	cm.electionTimer = *time.AfterFunc(getRandomDuration(ELEC_TIMER_MIN, ELEC_TIMER_MAX), cm.startElection)
 
+	// Start replication loop
+	go cm.replicationManager()
+
 	// TODO: start rpc server
 	// TODO: start client cmd handler
 
@@ -125,89 +130,121 @@ func (cm *ConsensusModule) ApplyCommand(cmd Command) error {
 	}
 	cm.mu.Unlock() // Lock is released before channel utilization because those already use an internal mutex to handle concurrency
 
-	cm.cliCmdRequests <- cmd
-	response := <-cm.cliCmdResponses
-	// TODO: add leader logic
+	response := error(nil)
+	if cmd[0] == "CC" {
+		response = cm.applyLeaderConfigCange(cmd)
+	} else {
+		cm.cliCmdRequests <- cmd
+		// WARN: config changes skew the synchronization
+		response = <-cm.cliCmdResponses
+		// TODO: add leader logic
+	}
 
 	return response
+}
+
+/*
+ * Replicatin Logic
+ */
+
+// create and append new entry to the log
+// - increments the global log index and appends the new entry to the log
+func (cm *ConsensusModule) appendNewLogEntry(cmd Command) {
+	cm.currentIdx++
+
+	entry := logEntry{
+		idx:  cm.currentIdx,
+		term: cm.currentTerm,
+		cmd:  cmd,
+	}
+
+	cm.log = append(cm.log, entry)
 }
 
 // receives commands from clients and starts the replication process
 // - starts the replicator workers
 // - when new logs available to replicate, signals workers to wake
 func (cm *ConsensusModule) replicationManager() {
-	for id, ch := range cm.replicatorChannels {
-		go replicatorWorker(id, ch)
-		// TODO: init channels !!
+	// initialize workers and related infrastructure
+	for id := range cm.clusterConfiguration {
+		// create and save wakeup channel
+		ch := make(chan struct{})
+		cm.replicatorChannels[id] = ch
+
+		// initizlize worker
+		go cm.replicatorWorker(id, ch, false)
 	}
 
 	for {
+		// When receiving command from client
 		cmd := <-cm.cliCmdRequests
 		cm.mu.Lock()
-		cm.currentIdx++
-		entry := logEntry{
-			idx:  cm.currentIdx,
-			term: cm.currentTerm,
-			cmd:  Command(cmd),
-		}
 
-		if cmd[0] != "CC" {
-			cm.log = append(cm.log, entry)
+		// append entry to the log
+		cm.appendNewLogEntry(cmd)
 
-			for _, ch := range cm.replicatorChannels {
-				select {
-				case ch <- struct{}{}:
-				default:
-				}
+		// wakeup replicators
+		for _, ch := range cm.replicatorChannels {
+			select {
+			case ch <- struct{}{}: // signal replicator if idle
+			default: // let it work otherwise
 			}
-
-		} else {
-			go cm.applyLeaderConfigCange(cmd)
 		}
 
 		cm.mu.Unlock()
 	}
 }
 
-// replicates all the available log entries to the target node
+// replicates all the available log entries to the target node and sends heartbeats as needed
 // - when no further logs available for replication, goes to sleep
 // - when woken probes for new logs and eventually starts the process
-func (cm *ConsensusModule) replicatorWorker(node NodeID, newLogsAvailable chan struct{}, votingMember bool) {
-	hostIdx := cm.currentIdx
+// - NEARTBEAT_DELAY time after last replicatin, an heartbeat is sent
+func (cm *ConsensusModule) replicatorWorker(node NodeID, newLogsAvailable chan struct{}, newNode bool) {
+	remoteNodeIdx := cm.currentIdx
 	heartbeatTimer := time.NewTimer(HEARTBEAT_DELAY)
 
 	for {
+		// start heartbeat timer
 		heartbeatTimer.Reset(HEARTBEAT_DELAY)
-		replicationIdx := hostCommitIdx + 1
-		result := true // make request
-		if result {
-			hostIdx = replicationIdx
-			cm.replicationAckChan <- ReplicationAck{
-				id:  node,
-				idx: replicationIdx,
-			}
-		} else {
-			hostIdx - 1
-		}
 
-		if hostIdx == cm.currentIdx {
-			if !votingMember {
-				votingMember = true
-				cm.nonVotingMmbersChan <- node
+		// wait for new entries if no more logs to replicate
+		if remoteNodeIdx == cm.currentIdx {
+
+			// when "commit level" reached for the first time by new (non voting) node
+			// - signal readyness to vote (now voting member)
+			if !newNode {
+				newNode = true
+				cm.newVotingMembersChan <- node
 			}
+
+			// wait for new entries or send heartbeat
 			select {
 			case <-newLogsAvailable:
 			case <-heartbeatTimer.C:
-				// send heartbeat
-
+				// when heartbeat timer ticks, send heartbeat and continue with next iteration
+				// TODO: send heartbeat RPC
+				continue
 			}
-
 		}
+
+		currentReplicatingIdx := remoteNodeIdx + 1
+		result := true // TODO: make RPC request
+		if result {
+			// if replication successful, update remote idx tracker and send ack to consensus loop to calculate majority
+			remoteNodeIdx = currentReplicatingIdx
+			cm.replicationAckChan <- ReplicationAck{
+				id:  node,
+				idx: currentReplicatingIdx,
+			}
+		} else {
+			// if replication unsuccessful (consistency check fail) decrease remote idx tracker
+			remoteNodeIdx--
+		}
+
 	}
 }
 
 func (cm *ConsensusModule) consensusTrackerLoop() {
-
 	initializedIntermediateConfig := false
 	destroyedIntermediateConfig := true
 	replicationLedger := map[int][][]NodeID{} // maps log index to two-sized arrays
@@ -224,7 +261,7 @@ func (cm *ConsensusModule) consensusTrackerLoop() {
 			destroyedIntermediateConfig = false
 			// add to the list of nodes in the new config. which have replicated the log entry
 			// all the nodes (also) in the old configuration which have already replicated it
-			for k, _ := range replicationLedger {
+			for k := range replicationLedger {
 				replicationLedger[k][1] = sliceFilterIn(replicationLedger[k][0], cm.newConfig)
 			}
 		}
@@ -235,8 +272,8 @@ func (cm *ConsensusModule) consensusTrackerLoop() {
 			// ... forget about intermediate configuration
 			initializedIntermediateConfig = false
 			destroyedIntermediateConfig = true
-			
-			for k, _ := range replicationLedger {
+
+			for k := range replicationLedger {
 				replicationLedger[k][0] = replicationLedger[k][1]
 				replicationLedger[k][1] = []NodeID{}
 			}
@@ -270,14 +307,14 @@ func (cm *ConsensusModule) consensusTrackerLoop() {
 			replicationLedger[ack.idx][1] = append(replicationLedger[ack.idx][1], ack.id)
 		}
 
-		isQuorumReached := false;
+		isQuorumReached := false
 
 		if !cm.isIntermediateConfig {
 			standardQuorum := len(filterOut(cm.clusterConfiguration, cm.nonVotingNodes))/2 + 1
 			isQuorumReached = len(replicationLedger[ack.idx][0]) == standardQuorum
 		} else {
-			isQuorumReached = len(replicationLedger[ack.idx][0]) == (len(cm.oldConfig)/2 + 1) // consider old majority
-			isQuorumReached = isQuorumReached && len(replicationLedger[ack.idx][1]) == (len(cm.newConfig)/2 + 1) // consider new majority
+			isQuorumReached = len(replicationLedger[ack.idx][0]) == (len(cm.oldConfig)/2 + 1)                  // consider old majority
+			isQuorumReached = isQuorumReached && len(replicationLedger[ack.idx][1]) == (len(cm.newConfig)/2+1) // consider new majority
 		}
 
 		// if quorum for log idx is reached ; cm.commitChan <- ack.idx
@@ -450,7 +487,7 @@ func (cm *ConsensusModule) applyFollowerConfigChange(cfg Configuration) {
 	}
 }
 
-func (cm *ConsensusModule) applyLeaderConfigCange(cfg Configuration) {
+func (cm *ConsensusModule) applyLeaderConfigCange(cfg Configuration) error {
 	cm.nonVotingNodes = make([]NodeID, 0, 0)
 	for _, newNode := range cfg[1:] {
 		found := false
@@ -466,13 +503,13 @@ func (cm *ConsensusModule) applyLeaderConfigCange(cfg Configuration) {
 			cm.replicatorChannels[newNode] = make(chan struct{}) // prepare infrastructure for replicator worker
 
 			// init related replicatio worker
-			go cm.replicatorWorker(newNode, cm.replicatorChannels[newNode], false)
+			go cm.replicatorWorker(newNode, cm.replicatorChannels[newNode], true)
 		}
 	}
 
 	// wait for all nodes to get upt to commit level and gain voting privileges
 	for range cm.nonVotingNodes {
-		<-cm.nonVotingMembersChan
+		<-cm.newVotingMembersChan
 	}
 	cm.nonVotingNodes = []NodeID{}
 
@@ -481,13 +518,15 @@ func (cm *ConsensusModule) applyLeaderConfigCange(cfg Configuration) {
 	entry := logEntry{
 		idx:  cm.currentIdx,
 		term: cm.currentTerm,
-		cmd: append([]string{"CC", "IC"}, cfg[1:]...),
+		cmd:  append([]string{"CC", "IC"}, cfg[1:]...),
 	}
 	cm.log = append(cm.log, entry)
 
 	// wait for intermediate config to be committed
 	<-cm.configChanges // committed CC
 	// INFO: deprecated
+
+	return nil
 }
 
 func (cm *ConsensusModule) applyLeaderConfigChangePhase2() {
@@ -498,7 +537,7 @@ func (cm *ConsensusModule) applyLeaderConfigChangePhase2() {
 	entry := logEntry{
 		idx:  cm.currentIdx,
 		term: cm.currentTerm,
-		cmd: append([]string{"CC", "NC"}, cm.newConfig...),
+		cmd:  append([]string{"CC", "NC"}, cm.newConfig...),
 	}
 	cm.log = append(cm.log, entry)
 
