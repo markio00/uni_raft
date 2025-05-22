@@ -244,6 +244,47 @@ func (cm *ConsensusModule) replicatorWorker(node NodeID, newLogsAvailable chan s
 	}
 }
 
+func (cm *ConsensusModule) betterConsensusTrackerLoop() {
+	// initialize idx ledger (keeps track of replication idx for each node
+	ledger := map[NodeID]int{}
+	
+	for {
+		// update ledger when receiving ack
+		ack := <-cm.replicationAckChan
+		ledger[ack.id] = ack.idx
+
+		// if entry already committed, continue to next iteration
+		if ack.idx <= cm.commitIdx {
+			continue
+		}
+
+		// chech commit consensus
+		isIdxNowCommitted := false
+
+		if !cm.isIntermediateConfig {
+			count := 0
+			for id, commitIdx := range ledger {
+				if sliceContains(cm.nonVotingNodes, id) {
+
+				}
+			}
+			if count >= cm.quorum {
+				cm.commitIdx = ack.idx
+				cm.cliCmdResponses <- nil
+				// TODO: apply to state
+			}
+		} else [
+			countOld := 0
+			for id := range cm.clusterConfiguration {
+				if ledger[id] >= ack.idx {
+					count++
+				}
+			}
+	
+		]
+	}
+}
+
 func (cm *ConsensusModule) consensusTrackerLoop() {
 	initializedIntermediateConfig := false
 	destroyedIntermediateConfig := true
