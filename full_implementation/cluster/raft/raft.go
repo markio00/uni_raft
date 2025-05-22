@@ -31,6 +31,10 @@ type logEntry struct {
 type (
 	Command        = []string
 	Configuration  = []string
+	ElectionReply  = struct {
+		voteGranted bool
+		id          NodeID
+	}
 	NodeID         = string
 	ReplicationAck = struct {
 		id  NodeID
@@ -118,9 +122,9 @@ func (cm *ConsensusModule) Start() {
 
 // Aplies the given command to the distributed cluster
 // The call blocks until the command is committed to the cluster returning a nil
-// If the current node is not the leader, an error redirecting to the correct leader will be returned
+// If the current node is not the leader, an error redirectng to the correct leader will be returned
 // In exceptional circumstances when committing fails, an explainative error will be returned instead
-func (cm *ConsensusModule) ApplyCommand(cmd Command) error {
+func (cm *ConsensusModule) ApplyCommand(cmd Command) error { //TODO: Send heartbeat for read-only requests
 	cm.mu.Lock()
 	if cm.nodeStatus != LEADER {
 		// If the node is not the leader, send an error specifying the correct leader
@@ -150,6 +154,7 @@ func (cm *ConsensusModule) ApplyCommand(cmd Command) error {
 // create and append new entry to the log
 // - increments the global log index and appends the new entry to the log
 func (cm *ConsensusModule) appendNewLogEntry(cmd Command) {
+
 	cm.currentIdx++
 
 	entry := logEntry{
@@ -228,7 +233,7 @@ func (cm *ConsensusModule) replicatorWorker(node NodeID, newLogsAvailable chan s
 		}
 
 		currentReplicatingIdx := remoteNodeIdx + 1
-		result := true // TODO: make RPC request
+		result := true // TODO: make AppendEntry rpc
 		if result {
 			// if replication successful, update remote idx tracker and send ack to consensus loop to calculate majority
 			remoteNodeIdx = currentReplicatingIdx
@@ -245,7 +250,7 @@ func (cm *ConsensusModule) replicatorWorker(node NodeID, newLogsAvailable chan s
 }
 
 func (cm *ConsensusModule) betterConsensusTrackerLoop() {
-	// initialize idx ledger (keeps track of replication idx for each node
+	// initialize idx ledger (keeps track of last replicated idx for each node)
 	ledger := map[NodeID]int{}
 	
 	for {
@@ -258,118 +263,47 @@ func (cm *ConsensusModule) betterConsensusTrackerLoop() {
 			continue
 		}
 
-		// chech commit consensus
-		isIdxNowCommitted := false
+		// check commit consensus
+		isQuorumReached := false
 
 		if !cm.isIntermediateConfig {
 			count := 0
 			for id, commitIdx := range ledger {
-				if sliceContains(cm.nonVotingNodes, id) {
-
-				}
-			}
-			if count >= cm.quorum {
-				cm.commitIdx = ack.idx
-				cm.cliCmdResponses <- nil
-				// TODO: apply to state
-			}
-		} else [
-			countOld := 0
-			for id := range cm.clusterConfiguration {
-				if ledger[id] >= ack.idx {
+				if ! sliceContains(cm.nonVotingNodes, id) && ack.idx <= commitIdx {
 					count++
 				}
 			}
-	
-		]
-	}
-}
+			quorumOld, _ := cm.getQuorums()
+			isQuorumReached = count >= quorumOld
 
-func (cm *ConsensusModule) consensusTrackerLoop() {
-	initializedIntermediateConfig := false
-	destroyedIntermediateConfig := true
-	replicationLedger := map[int][][]NodeID{} // maps log index to two-sized arrays
-
-	// each two-sized array stores an array of the ips which have replicated the log index
-
-	for {
-		// Unlocks when an entry is replicated successfuly to one node
-		ack := <-cm.replicationAckChan
-
-		// if this is the first iteration where the curr. intermediate conf. is being used...
-		if cm.isIntermediateConfig && !initializedIntermediateConfig {
-			initializedIntermediateConfig = true
-			destroyedIntermediateConfig = false
-			// add to the list of nodes in the new config. which have replicated the log entry
-			// all the nodes (also) in the old configuration which have already replicated it
-			for k := range replicationLedger {
-				replicationLedger[k][1] = sliceFilterIn(replicationLedger[k][0], cm.newConfig)
-			}
-		}
-
-		// if this is the first iteration since you started to consider only the new conf after an intermediate configuration phase ended...
-		if !cm.isIntermediateConfig && !destroyedIntermediateConfig {
-
-			// ... forget about intermediate configuration
-			initializedIntermediateConfig = false
-			destroyedIntermediateConfig = true
-
-			for k := range replicationLedger {
-				replicationLedger[k][0] = replicationLedger[k][1]
-				replicationLedger[k][1] = []NodeID{}
-			}
-		}
-
-		// If entry is already committed, discard ack
-		if ack.idx <= cm.commitIdx {
-			continue
-		}
-
-		// if the entry has never been replicated, initialize
-		if _, ok := replicationLedger[ack.idx]; !ok {
-
-			replicationLedger[ack.idx] = [][]NodeID{}
-			replicationLedger[ack.idx][0] = []NodeID{}
-
-			if cm.isIntermediateConfig {
-				replicationLedger[ack.idx][1] = []NodeID{}
-			}
-		}
-
-		// if no intermediate config. is in progress or if the ack sender is part of the old config...
-		if !cm.isIntermediateConfig || sliceContains(cm.oldConfig, ack.id) {
-			// add ack sender's id to the list of nodes in the old config.  which have replicated the log entry
-			replicationLedger[ack.idx][0] = append(replicationLedger[ack.idx][0], ack.id)
-		}
-
-		// if intermediate config. is in progress and the ack sender is part of the new config...
-		if cm.isIntermediateConfig && sliceContains(cm.newConfig, ack.id) {
-			// add ack sender's id to the list of nodes in the new config.  which have replicated the log entry
-			replicationLedger[ack.idx][1] = append(replicationLedger[ack.idx][1], ack.id)
-		}
-
-		isQuorumReached := false
-
-		if !cm.isIntermediateConfig {
-			standardQuorum := len(filterOut(cm.clusterConfiguration, cm.nonVotingNodes))/2 + 1
-			isQuorumReached = len(replicationLedger[ack.idx][0]) == standardQuorum
 		} else {
-			isQuorumReached = len(replicationLedger[ack.idx][0]) == (len(cm.oldConfig)/2 + 1)                  // consider old majority
-			isQuorumReached = isQuorumReached && len(replicationLedger[ack.idx][1]) == (len(cm.newConfig)/2+1) // consider new majority
-		}
+			countOld := 0
+			countNew := 0
+			for id, commitIdx := range ledger {
+				if sliceContains(cm.oldConfig, id) && ack.idx <= commitIdx {
+					countOld++
+				}
+			}
+			for id, commitIdx := range ledger {
+				if sliceContains(cm.newConfig, id) && ack.idx <= commitIdx {
+					countNew++
+				}
+			}
 
-		// if quorum for log idx is reached ; cm.commitChan <- ack.idx
+			quorumOld, quorumNew := cm.getQuorums()
+			isQuorumReached = countOld >= quorumOld && countNew >= quorumNew
+	}
+
 		if isQuorumReached {
+			cm.commitIdx = ack.idx
+			cm.cliCmdResponses <- nil
+			// TODO: apply to state (trigger callback)
 			if cm.isIntermediateConfig && cm.log[ack.idx].cmd[0] == "CC" {
 				// start phase 2
 				go cm.applyLeaderConfigChangePhase2()
 			}
 		}
 	}
-}
-
-func (cm *ConsensusModule) commitHandler() {
-	// TODO:
 }
 
 /*
@@ -582,7 +516,7 @@ func (cm *ConsensusModule) applyLeaderConfigChangePhase2() {
 	}
 	cm.log = append(cm.log, entry)
 
-	// TODO: chang config infastructure to new config
+	// TODO: change config infastructure to new config
 
 	// if not leader anymore (not in new config)
 	cm.nodeStatus = FOLLOWER
@@ -598,41 +532,71 @@ func (cm *ConsensusModule) applyLeaderConfigChangePhase2() {
  */
 
 func (cm *ConsensusModule) startElection() {
-	// TODO: implement eletion logic
-
 	cm.nodeStatus = CANDIDATE
 
-	ch := make(chan bool)
-	for range cm.clusterConfiguration {
-		go func(ch chan bool) {
-			res := true // request vote rpc
-			ch <- res
+	ch := make(chan ElectionReply)
+
+	for id, _ := range filterOut(cm.clusterConfiguration, cm.nonVotingNodes) {
+		go func(ch chan ElectionReply) {
+			res := true // TODO: request vote rpc
+			ch <- ElectionReply{voteGranted: res, id: id}
 		}(ch)
 	}
+			
+	canWin := true
+	positiveAnswers := 0
+	positiveAnswersOld := 0
+	positiveAnswersNew := 0
+	isQuorumReached := false
+	negativeAnswers := 0
+	negativeAnswersOld := 0
+	negativeAnswersNew := 0
 
-	quorum := len(cm.configChanges)/2 + 1
-	for i := 0; i < quorum; i++ {
-	}
-	won := false
-	winPossible := true
-	replyCounter := 0
-	voteCounter := 0
-	for !won || winPossible {
-		res := <-ch
-		replyCounter++
-		if res {
-			voteCounter++
+	for !isQuorumReached && canWin {
+
+		select {
+			case electionReply := <- ch:
+				if !cm.isIntermediateConfig {
+					if electionReply.voteGranted {
+						positiveAnswers++
+					} else {
+						negativeAnswers++
+					}
+
+					quorumOld, _ := cm.getQuorums()
+					canWin = negativeAnswers < quorumOld
+					isQuorumReached = positiveAnswers >= quorumOld
+				} else {
+				
+					if sliceContains(cm.oldConfig, electionReply.id) {
+						if electionReply.voteGranted {
+							positiveAnswersOld++
+						} else {
+							negativeAnswersOld++
+						}
+					}
+
+					if sliceContains(cm.newConfig, electionReply.id) {
+						if electionReply.voteGranted {
+							positiveAnswersNew++
+						} else {
+							negativeAnswersNew++
+						}
+					}
+
+					quorumOld, quorumNew := cm.getQuorums()
+					canWin = negativeAnswersOld < quorumOld && negativeAnswersNew < quorumNew
+					isQuorumReached = positiveAnswersOld >= quorumOld && positiveAnswersNew >= quorumNew
+				}
+			default:
 		}
-
-		won = voteCounter >= quorum
-		winPossible = (replyCounter - voteCounter) >= quorum
 	}
 
-	if won {
+	if isQuorumReached {
 		cm.nodeStatus = LEADER
 
 		// TODO: init leader related stuff
-		// send heartbeats, send noop
+		// TODO: send heartbeats, send noop
 	} else {
 		cm.nodeStatus = FOLLOWER
 	}
@@ -676,6 +640,17 @@ func sliceFilterIn[T comparable](slice []T, filter []T) (res []T) {
 	return res
 }
 
+func sliceFilterOut[T comparable](slice []T, filter []T) (res []T) {
+	for _, v := range slice {
+		if ! sliceContains(filter, v) {
+			res = append(res, v)
+		}
+	}
+
+	return res
+}
+
+
 // Filters map keys outside the filter key
 func filterOut[K comparable, V any](m map[K]V, keys []K) (res map[K]V) {
 	for k, v := range m {
@@ -714,4 +689,16 @@ func sliceDelete[T comparable](slice []T, element T) []T {
 	}
 
 	return slice
+}
+
+func (cm *ConsensusModule) getQuorums() (int, int) {
+
+	if !cm.isIntermediateConfig {
+		quorum := len(filterOut(cm.clusterConfiguration, cm.nonVotingNodes))/2 + 1
+		return quorum, -1
+	} else {
+		quorumOld := len(cm.oldConfig)/2 + 1
+		quorumNew := len(cm.newConfig)/2 + 1
+		return quorumOld, quorumNew
+	}
 }
