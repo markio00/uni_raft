@@ -29,18 +29,20 @@ type logEntry struct {
 }
 
 type (
-	Command        = []string
-	Configuration  = []string
-	ElectionReply  = struct {
+	Command       = []string
+	Configuration = []string
+	NodeID        = string
+	ElectionReply = struct {
 		voteGranted bool
 		id          NodeID
 	}
-	NodeID         = string
 	ReplicationAck = struct {
 		id  NodeID
 		idx int
 	}
 )
+
+type queue struct{}
 
 type ConsensusModule struct {
 	mu sync.Mutex
@@ -58,6 +60,7 @@ type ConsensusModule struct {
 	oldConfig            []NodeID
 	newConfig            []NodeID
 	isIntermediateConfig bool
+	lastConfigChangeIdx  int
 
 	// Election related fields
 	electionTimer    time.Timer
@@ -65,9 +68,9 @@ type ConsensusModule struct {
 	votedFor         NodeID
 
 	// Communication with action handler goroutine
-	cliCmdRequests     chan Command
-	cliCmdResponses    chan error
-	replicatorChannels map[NodeID]chan struct{}
+	signalNewEntryToReplicate chan struct{}
+	replicatorChannels        map[NodeID]chan struct{}
+	commitSignalingChans      map[int]chan error
 
 	// Signaling for leader configuration change
 	configChanges chan Command
@@ -80,6 +83,8 @@ type ConsensusModule struct {
 	replicationAckChan   chan ReplicationAck
 	commitChan           chan int // send index to commit
 	newVotingMembersChan chan NodeID
+
+	requestQueue queue
 }
 
 /*
@@ -110,7 +115,7 @@ func (cm *ConsensusModule) Start() {
 	cm.electionTimer = *time.AfterFunc(getRandomDuration(ELEC_TIMER_MIN, ELEC_TIMER_MAX), cm.startElection)
 
 	// Start replication loop
-	go cm.replicationManager()
+	go cm.replicationManager() // FIX: only needede if leader
 
 	// TODO: start rpc server
 	// TODO: start client cmd handler
@@ -124,37 +129,48 @@ func (cm *ConsensusModule) Start() {
 // The call blocks until the command is committed to the cluster returning a nil
 // If the current node is not the leader, an error redirectng to the correct leader will be returned
 // In exceptional circumstances when committing fails, an explainative error will be returned instead
-func (cm *ConsensusModule) ApplyCommand(cmd Command) error { //TODO: Send heartbeat for read-only requests
-	cm.mu.Lock()
+
+func (cm *ConsensusModule) ApplyCommand(cmd Command) error {
 	if cm.nodeStatus != LEADER {
 		// If the node is not the leader, send an error specifying the correct leader
-		cm.mu.Unlock()
 		// FIX: should be discrete error type
 		return errors.New("Not the leader, contact " + string(cm.votedFor))
 	}
-	cm.mu.Unlock() // Lock is released before channel utilization because those already use an internal mutex to handle concurrency
 
-	response := error(nil)
+	// if handling config change, take necessary  preparation steps
 	if cmd[0] == "CC" {
-		response = cm.applyLeaderConfigCange(cmd)
-	} else {
-		cm.cliCmdRequests <- cmd
-		// WARN: config changes skew the synchronization
-		response = <-cm.cliCmdResponses
-		// TODO: add leader logic
+		cmd = cm.prepareLeaderConfigChange(cmd)
 	}
+
+	// append and start replication of the configuration entry
+	return cm.appendAndReplicate(cmd)
+}
+
+// TODO: when configuration change happens (both leader and follower), update the cc entry idx
+
+func (cm *ConsensusModule) appendAndReplicate(cmd Command) error { // TODO: Send heartbeat for read-only requests
+
+	// create and append log entry, return related idx
+	idx := cm.appendNewLogEntry(cmd)
+
+	// create and store a commit signaling channel
+	ch := make(chan error)
+	cm.commitSignalingChans[idx] = ch
+
+	// signal new entry available to replicator
+	cm.signalNewEntryToReplicate <- struct{}{}
+
+	// wait for commit signal on dedicated channel, then deallocate
+	response := <-ch
+	close(ch)
+	delete(cm.commitSignalingChans, idx)
 
 	return response
 }
 
-/*
- * Replicatin Logic
- */
-
 // create and append new entry to the log
 // - increments the global log index and appends the new entry to the log
-func (cm *ConsensusModule) appendNewLogEntry(cmd Command) {
-
+func (cm *ConsensusModule) appendNewLogEntry(cmd Command) int {
 	cm.currentIdx++
 
 	entry := logEntry{
@@ -163,147 +179,9 @@ func (cm *ConsensusModule) appendNewLogEntry(cmd Command) {
 		cmd:  cmd,
 	}
 
-	cm.log = append(cm.log, entry)
-}
+	cm.appendToLog(entry)
 
-// receives commands from clients and starts the replication process
-// - starts the replicator workers
-// - when new logs available to replicate, signals workers to wake
-func (cm *ConsensusModule) replicationManager() {
-	// initialize workers and related infrastructure
-	for id := range cm.clusterConfiguration {
-		// create and save wakeup channel
-		ch := make(chan struct{})
-		cm.replicatorChannels[id] = ch
-
-		// initizlize worker
-		go cm.replicatorWorker(id, ch, false)
-	}
-
-	for {
-		// When receiving command from client
-		cmd := <-cm.cliCmdRequests
-		cm.mu.Lock()
-
-		// append entry to the log
-		cm.appendNewLogEntry(cmd)
-
-		// wakeup replicators
-		for _, ch := range cm.replicatorChannels {
-			select {
-			case ch <- struct{}{}: // signal replicator if idle
-			default: // let it work otherwise
-			}
-		}
-
-		cm.mu.Unlock()
-	}
-}
-
-// replicates all the available log entries to the target node and sends heartbeats as needed
-// - when no further logs available for replication, goes to sleep
-// - when woken probes for new logs and eventually starts the process
-// - NEARTBEAT_DELAY time after last replicatin, an heartbeat is sent
-func (cm *ConsensusModule) replicatorWorker(node NodeID, newLogsAvailable chan struct{}, newNode bool) {
-	remoteNodeIdx := cm.currentIdx
-	heartbeatTimer := time.NewTimer(HEARTBEAT_DELAY)
-
-	for {
-		// start heartbeat timer
-		heartbeatTimer.Reset(HEARTBEAT_DELAY)
-
-		// wait for new entries if no more logs to replicate
-		if remoteNodeIdx == cm.currentIdx {
-
-			// when "commit level" reached for the first time by new (non voting) node
-			// - signal readyness to vote (now voting member)
-			if !newNode {
-				newNode = true
-				cm.newVotingMembersChan <- node
-			}
-
-			// wait for new entries or send heartbeat
-			select {
-			case <-newLogsAvailable:
-			case <-heartbeatTimer.C:
-				// when heartbeat timer ticks, send heartbeat and continue with next iteration
-				// TODO: send heartbeat RPC
-				continue
-			}
-		}
-
-		currentReplicatingIdx := remoteNodeIdx + 1
-		result := true // TODO: make AppendEntry rpc
-		if result {
-			// if replication successful, update remote idx tracker and send ack to consensus loop to calculate majority
-			remoteNodeIdx = currentReplicatingIdx
-			cm.replicationAckChan <- ReplicationAck{
-				id:  node,
-				idx: currentReplicatingIdx,
-			}
-		} else {
-			// if replication unsuccessful (consistency check fail) decrease remote idx tracker
-			remoteNodeIdx--
-		}
-
-	}
-}
-
-func (cm *ConsensusModule) betterConsensusTrackerLoop() {
-	// initialize idx ledger (keeps track of last replicated idx for each node)
-	ledger := map[NodeID]int{}
-	
-	for {
-		// update ledger when receiving ack
-		ack := <-cm.replicationAckChan
-		ledger[ack.id] = ack.idx
-
-		// if entry already committed, continue to next iteration
-		if ack.idx <= cm.commitIdx {
-			continue
-		}
-
-		// check commit consensus
-		isQuorumReached := false
-
-		if !cm.isIntermediateConfig {
-			count := 0
-			for id, commitIdx := range ledger {
-				if ! sliceContains(cm.nonVotingNodes, id) && ack.idx <= commitIdx {
-					count++
-				}
-			}
-			quorumOld, _ := cm.getQuorums()
-			isQuorumReached = count >= quorumOld
-
-		} else {
-			countOld := 0
-			countNew := 0
-			for id, commitIdx := range ledger {
-				if sliceContains(cm.oldConfig, id) && ack.idx <= commitIdx {
-					countOld++
-				}
-			}
-			for id, commitIdx := range ledger {
-				if sliceContains(cm.newConfig, id) && ack.idx <= commitIdx {
-					countNew++
-				}
-			}
-
-			quorumOld, quorumNew := cm.getQuorums()
-			isQuorumReached = countOld >= quorumOld && countNew >= quorumNew
-	}
-
-		if isQuorumReached {
-			cm.commitIdx = ack.idx
-			cm.cliCmdResponses <- nil
-			// TODO: apply to state (trigger callback)
-			if cm.isIntermediateConfig && cm.log[ack.idx].cmd[0] == "CC" {
-				// start phase 2
-				go cm.applyLeaderConfigChangePhase2()
-			}
-		}
-	}
+	return cm.currentIdx
 }
 
 /*
@@ -322,6 +200,9 @@ func (cm *ConsensusModule) HandleTerm(reqTerm int, leaderID NodeID) bool {
 
 	if reqTerm > cm.currentTerm {
 		// register term change and fallback to Follower
+		if cm.nodeStatus == LEADER {
+			// TODO: stop leader behaviour
+		}
 		cm.currentTerm = reqTerm
 		cm.nodeStatus = FOLLOWER
 	}
@@ -354,6 +235,14 @@ func (cm *ConsensusModule) ConsistencyCheck(ccIdx, ccTerm int) bool {
 	return lastEntry.idx == ccIdx && lastEntry.term == ccTerm
 }
 
+func (cm *ConsensusModule) appendToLog(entry logEntry) {
+	cm.log = append(cm.log, entry)
+
+	if entry.cmd[0] == "CC" {
+		cm.lastConfigChangeIdx = cm.currentIdx
+	}
+}
+
 // Append already consistent entry to the local log and apply configuration change if one is detected
 func (cm *ConsensusModule) AppendEntry(entry logEntry) {
 	if entry.cmd[0] == "CC" {
@@ -361,7 +250,7 @@ func (cm *ConsensusModule) AppendEntry(entry logEntry) {
 		cm.applyFollowerConfigChange(Configuration(entry.cmd[1:]))
 	}
 
-	cm.log = append(cm.log, entry)
+	cm.appendToLog(entry)
 }
 
 func (cm *ConsensusModule) SyncCommitIdx(leaderCommitIdx int) {
@@ -403,131 +292,6 @@ func (cm *ConsensusModule) VoteFor(candidateID NodeID) bool {
 }
 
 /*
- * Configuration Change Logic
- */
-
-// Apply the configuratino change to a receiving follower
-func (cm *ConsensusModule) applyFollowerConfigChange(cfg Configuration) {
-	defer cm.mu.Unlock()
-	cm.mu.Lock()
-
-	if cfg[0] == "IC" {
-		// if 'IF' flag set, set intermediate config
-		cm.isIntermediateConfig = true
-
-		// make the old config from the actual cluste config
-		cm.oldConfig = make([]NodeID, 0, len(cm.clusterConfiguration))
-		for k := range cm.clusterConfiguration {
-			cm.oldConfig = append(cm.oldConfig, k)
-		}
-
-		// make the new config from the received config
-		cm.newConfig = make([]NodeID, 0, len(cfg[1:]))
-		for _, v := range cfg[1:] {
-			cm.newConfig = append(cm.newConfig, NodeID(v))
-		}
-
-		// add connections for the new nodes
-		for _, newNode := range cfg[1:] {
-			found := false
-			for _, v := range cm.oldConfig {
-				found = found || NodeID(newNode) == v
-			}
-
-			if !found {
-				// send the NodeID to the connManager to add the connection
-				cm.newConnChan <- NodeID(newNode)
-			}
-		}
-	}
-
-	if cfg[0] == "NC" {
-		// delete connections for the old nodes
-		for _, oldNode := range cm.oldConfig {
-			found := false
-			for _, v := range cm.newConfig {
-				found = found || NodeID(oldNode) == v
-			}
-
-			if !found {
-				// send the NodeID to the connManager to delete the connection
-				cm.delConnChan <- NodeID(oldNode)
-			}
-		}
-
-		// reset intermediate config fields
-		cm.oldConfig = []NodeID{}
-		cm.newConfig = []NodeID{}
-		cm.isIntermediateConfig = false
-	}
-}
-
-func (cm *ConsensusModule) applyLeaderConfigCange(cfg Configuration) error {
-	cm.nonVotingNodes = make([]NodeID, 0, 0)
-	for _, newNode := range cfg[1:] {
-		found := false
-		for currNode := range cm.clusterConfiguration {
-			found = found || currNode == newNode
-		}
-
-		// if node is a new node for the cluster
-		if !found {
-			cm.newConnChan <- NodeID(newNode)                      // init new connection to node
-			cm.nonVotingNodes = append(cm.nonVotingNodes, newNode) // add node to the "non voting" filter
-
-			cm.replicatorChannels[newNode] = make(chan struct{}) // prepare infrastructure for replicator worker
-
-			// init related replicatio worker
-			go cm.replicatorWorker(newNode, cm.replicatorChannels[newNode], true)
-		}
-	}
-
-	// wait for all nodes to get upt to commit level and gain voting privileges
-	for range cm.nonVotingNodes {
-		<-cm.newVotingMembersChan
-	}
-	cm.nonVotingNodes = []NodeID{}
-
-	// append intermiediate config to log and start replciation
-	cm.currentIdx++
-	entry := logEntry{
-		idx:  cm.currentIdx,
-		term: cm.currentTerm,
-		cmd:  append([]string{"CC", "IC"}, cfg[1:]...),
-	}
-	cm.log = append(cm.log, entry)
-
-	// wait for intermediate config to be committed
-	<-cm.configChanges // committed CC
-	// INFO: deprecated
-
-	return nil
-}
-
-func (cm *ConsensusModule) applyLeaderConfigChangePhase2() {
-	cm.isIntermediateConfig = false
-
-	// append new config to log and start replication
-	cm.currentIdx++
-	entry := logEntry{
-		idx:  cm.currentIdx,
-		term: cm.currentTerm,
-		cmd:  append([]string{"CC", "NC"}, cm.newConfig...),
-	}
-	cm.log = append(cm.log, entry)
-
-	// TODO: change config infastructure to new config
-
-	// if not leader anymore (not in new config)
-	cm.nodeStatus = FOLLOWER
-	// destroy all replicators
-	// and all leader loops
-
-	// else if sitll leader (in new config)
-	// destroy replicators for old nodes
-}
-
-/*
  * Election Logic
  */
 
@@ -536,13 +300,13 @@ func (cm *ConsensusModule) startElection() {
 
 	ch := make(chan ElectionReply)
 
-	for id, _ := range filterOut(cm.clusterConfiguration, cm.nonVotingNodes) {
+	for id := range filterOut(cm.clusterConfiguration, cm.nonVotingNodes) {
 		go func(ch chan ElectionReply) {
 			res := true // TODO: request vote rpc
 			ch <- ElectionReply{voteGranted: res, id: id}
 		}(ch)
 	}
-			
+
 	canWin := true
 	positiveAnswers := 0
 	positiveAnswersOld := 0
@@ -553,42 +317,41 @@ func (cm *ConsensusModule) startElection() {
 	negativeAnswersNew := 0
 
 	for !isQuorumReached && canWin {
-
 		select {
-			case electionReply := <- ch:
-				if !cm.isIntermediateConfig {
-					if electionReply.voteGranted {
-						positiveAnswers++
-					} else {
-						negativeAnswers++
-					}
-
-					quorumOld, _ := cm.getQuorums()
-					canWin = negativeAnswers < quorumOld
-					isQuorumReached = positiveAnswers >= quorumOld
+		case electionReply := <-ch:
+			if !cm.isIntermediateConfig {
+				if electionReply.voteGranted {
+					positiveAnswers++
 				} else {
-				
-					if sliceContains(cm.oldConfig, electionReply.id) {
-						if electionReply.voteGranted {
-							positiveAnswersOld++
-						} else {
-							negativeAnswersOld++
-						}
-					}
-
-					if sliceContains(cm.newConfig, electionReply.id) {
-						if electionReply.voteGranted {
-							positiveAnswersNew++
-						} else {
-							negativeAnswersNew++
-						}
-					}
-
-					quorumOld, quorumNew := cm.getQuorums()
-					canWin = negativeAnswersOld < quorumOld && negativeAnswersNew < quorumNew
-					isQuorumReached = positiveAnswersOld >= quorumOld && positiveAnswersNew >= quorumNew
+					negativeAnswers++
 				}
-			default:
+
+				quorumOld, _ := cm.getQuorums()
+				canWin = negativeAnswers < quorumOld
+				isQuorumReached = positiveAnswers >= quorumOld
+			} else {
+
+				if sliceContains(cm.oldConfig, electionReply.id) {
+					if electionReply.voteGranted {
+						positiveAnswersOld++
+					} else {
+						negativeAnswersOld++
+					}
+				}
+
+				if sliceContains(cm.newConfig, electionReply.id) {
+					if electionReply.voteGranted {
+						positiveAnswersNew++
+					} else {
+						negativeAnswersNew++
+					}
+				}
+
+				quorumOld, quorumNew := cm.getQuorums()
+				canWin = negativeAnswersOld < quorumOld && negativeAnswersNew < quorumNew
+				isQuorumReached = positiveAnswersOld >= quorumOld && positiveAnswersNew >= quorumNew
+			}
+		default:
 		}
 	}
 
@@ -642,14 +405,13 @@ func sliceFilterIn[T comparable](slice []T, filter []T) (res []T) {
 
 func sliceFilterOut[T comparable](slice []T, filter []T) (res []T) {
 	for _, v := range slice {
-		if ! sliceContains(filter, v) {
+		if !sliceContains(filter, v) {
 			res = append(res, v)
 		}
 	}
 
 	return res
 }
-
 
 // Filters map keys outside the filter key
 func filterOut[K comparable, V any](m map[K]V, keys []K) (res map[K]V) {
@@ -692,7 +454,6 @@ func sliceDelete[T comparable](slice []T, element T) []T {
 }
 
 func (cm *ConsensusModule) getQuorums() (int, int) {
-
 	if !cm.isIntermediateConfig {
 		quorum := len(filterOut(cm.clusterConfiguration, cm.nonVotingNodes))/2 + 1
 		return quorum, -1
