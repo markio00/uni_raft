@@ -1,9 +1,10 @@
 package raft
 
 import "time"
+import "context"
 
 /*
- * Replicatin Logic
+ * Replication Logic
  */
 
 // receives commands from clients and starts the replication process
@@ -11,18 +12,31 @@ import "time"
 // - when new logs available to replicate, signals workers to wake
 func (cm *ConsensusModule) replicationManager() {
 	// initialize workers and related infrastructure
+	
+	ctx, cancel := context.WithCancel(context.Background())
+
+	cm.ctx = ctx
+	cm.cancel = cancel
+
+	go cm.betterConsensusTrackerLoop()
+
 	for id := range cm.clusterConfiguration {
 		// create and save wakeup channel
 		ch := make(chan struct{})
 		cm.replicatorChannels[id] = ch
 
-		// initizlize worker
+		// initialize worker
 		go cm.replicatorWorker(id, ch, false)
 	}
 
 	for {
+		select {
+			case <-cm.ctx.Done():
+				return
+			default:
+		}
 		// When receiving command from client
-		cmd := <-cm.signalNewEntryToReplciate
+		<-cm.signalNewEntryToReplicate
 		cm.mu.Lock()
 
 		// wakeup replicators
@@ -42,10 +56,18 @@ func (cm *ConsensusModule) replicationManager() {
 // - when woken probes for new logs and eventually starts the process
 // - NEARTBEAT_DELAY time after last replicatin, an heartbeat is sent
 func (cm *ConsensusModule) replicatorWorker(node NodeID, newLogsAvailable chan struct{}, newNode bool) {
+
+	// TODO: Send noop if just started
+
 	remoteNodeIdx := cm.currentIdx
 	heartbeatTimer := time.NewTimer(HEARTBEAT_DELAY)
 
 	for {
+		select {
+			case <-cm.ctx.Done():
+				return
+			default:
+		}
 		// start heartbeat timer
 		heartbeatTimer.Reset(HEARTBEAT_DELAY)
 
@@ -82,7 +104,6 @@ func (cm *ConsensusModule) replicatorWorker(node NodeID, newLogsAvailable chan s
 			// if replication unsuccessful (consistency check fail) decrease remote idx tracker
 			remoteNodeIdx--
 		}
-
 	}
 }
 
@@ -91,6 +112,11 @@ func (cm *ConsensusModule) betterConsensusTrackerLoop() {
 	ledger := map[NodeID]int{}
 
 	for {
+		select {
+			case <-cm.ctx.Done():
+				return
+			default:
+		}
 		// update ledger when receiving ack
 		ack := <-cm.replicationAckChan
 		ledger[ack.id] = ack.idx

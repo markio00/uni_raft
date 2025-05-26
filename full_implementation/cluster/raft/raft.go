@@ -1,6 +1,7 @@
 package raft
 
 import (
+	"context"
 	"errors"
 	"math/rand"
 	"net/rpc"
@@ -85,6 +86,10 @@ type ConsensusModule struct {
 	newVotingMembersChan chan NodeID
 
 	requestQueue queue
+
+	// Replication related threads signaling
+	ctx context.Context
+	cancel context.CancelFunc
 }
 
 /*
@@ -185,6 +190,14 @@ func (cm *ConsensusModule) appendNewLogEntry(cmd Command) int {
 }
 
 /*
+ * Node state
+ */
+
+func (cm *ConsensusModule) leader2follower() {
+	cm.cancel()	
+}
+
+/*
  * Shared APIs
  */
 
@@ -199,12 +212,13 @@ func (cm *ConsensusModule) HandleTerm(reqTerm int, leaderID NodeID) bool {
 	}
 
 	if reqTerm > cm.currentTerm {
+		// TODO: Save leader's id if needed
 		// register term change and fallback to Follower
 		if cm.nodeStatus == LEADER {
-			// TODO: stop leader behaviour
+			cm.leader2follower()
 		}
-		cm.currentTerm = reqTerm
 		cm.nodeStatus = FOLLOWER
+		cm.currentTerm = reqTerm
 	}
 
 	return true
@@ -358,8 +372,8 @@ func (cm *ConsensusModule) startElection() {
 	if isQuorumReached {
 		cm.nodeStatus = LEADER
 
-		// TODO: init leader related stuff
-		// TODO: send heartbeats, send noop
+		go cm.replicationManager()
+
 	} else {
 		cm.nodeStatus = FOLLOWER
 	}
