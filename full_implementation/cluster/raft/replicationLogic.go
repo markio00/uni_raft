@@ -83,11 +83,11 @@ func (cm *ConsensusModule) replicatorWorker(node NodeID, newLogsAvailable chan s
 
 			// wait for new entries or send heartbeat
 			select {
-			case <-newLogsAvailable:
-			case <-heartbeatTimer.C:
-				// when heartbeat timer ticks, send heartbeat and continue with next iteration
-				// TODO: send heartbeat RPC
-				continue
+				case <-newLogsAvailable:
+				case <-heartbeatTimer.C:
+					// when heartbeat timer ticks, send heartbeat and continue with next iteration
+					// TODO: send heartbeat RPC
+					continue
 			}
 		}
 
@@ -159,14 +159,14 @@ func (cm *ConsensusModule) betterConsensusTrackerLoop() {
 
 		if isQuorumReached {
 			cm.commitIdx = ack.idx
-			cm.registry[ack.idx] <- nil
+			cm.commitSignalingChans[ack.idx] <- nil
 			// TODO: apply to state (trigger callback)
 
 			if cm.isIntermediateConfig && cm.lastConfigChangeIdx <= cm.commitIdx {
 				// start phase 2
 				go cm.applyLeaderConfigChangePhase2()
-				// WARN: isIntermediateConfig has to be set to false before any other idx is committeed because otherwiswe
-				// phase 2 will execute multiple times
+				// WARN: isIntermediateConfig has to be set to false before any other idx is committed because otherwise
+				// phase 2 would execute multiple times
 				// INFO: the condition checks if we are in intermdiate config and it's been committed to avoid edge case where
 				// leader sets config change committed before sending new config
 				// FIX:	keep a state lock until both idx set to committed and new cfg entry appended so that no node will ever

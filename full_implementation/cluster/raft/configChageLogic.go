@@ -6,14 +6,16 @@ package raft
 
 // Apply the configuratino change to a receiving follower
 func (cm *ConsensusModule) applyFollowerConfigChange(cfg Configuration) {
+
+	// PERF: Merge with leader CC (phase 1 and 2)
 	defer cm.mu.Unlock()
 	cm.mu.Lock()
 
 	if cfg[0] == "IC" {
-		// if 'IF' flag set, set intermediate config
+		// if 'IC' flag set, set intermediate config
 		cm.isIntermediateConfig = true
 
-		// make the old config from the actual cluste config
+		// make the old config from the actual cluster config
 		cm.oldConfig = make([]NodeID, 0, len(cm.clusterConfiguration))
 		for k := range cm.clusterConfiguration {
 			cm.oldConfig = append(cm.oldConfig, k)
@@ -75,7 +77,7 @@ func (cm *ConsensusModule) prepareLeaderConfigChange(cfg Configuration) Command 
 
 			cm.replicatorChannels[newNode] = make(chan struct{}) // prepare infrastructure for replicator worker
 
-			// init related replicatio worker
+			// init related replication worker
 			go cm.replicatorWorker(newNode, cm.replicatorChannels[newNode], true)
 		}
 	}
@@ -93,6 +95,7 @@ func (cm *ConsensusModule) prepareLeaderConfigChange(cfg Configuration) Command 
 }
 
 func (cm *ConsensusModule) applyLeaderConfigChangePhase2() {
+	// PERF: Merge with follower CC
 	cm.isIntermediateConfig = false
 
 	// append new config to log and start replication
@@ -101,10 +104,10 @@ func (cm *ConsensusModule) applyLeaderConfigChangePhase2() {
 	// TODO: change config infastructure to new config
 
 	// if not leader anymore (not in new config)
-	cm.nodeStatus = FOLLOWER
-	// destroy all replicators
-	// and all leader loops
+	// 		set status to FOLLOWER
+	// 		destroy all replicators
+	// 		and all leader loops
 
-	// else if sitll leader (in new config)
-	// destroy replicators for old nodes
+	// else if still leader (in new config)
+	// 		destroy replicators for old nodes
 }

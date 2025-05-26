@@ -87,9 +87,9 @@ type ConsensusModule struct {
 
 	requestQueue queue
 
-	// Replication related threads signaling
-	ctx context.Context
-	cancel context.CancelFunc
+	// Signaling for replication related threads
+	ctx context.Context // used by threads to receive cancel signals
+	cancel context.CancelFunc // the function sending those signals
 }
 
 /*
@@ -127,7 +127,6 @@ func (cm *ConsensusModule) Start() {
 
 	// TODO: start all handlers
 
-	// TODO: implement duty cycle
 }
 
 // Aplies the given command to the distributed cluster
