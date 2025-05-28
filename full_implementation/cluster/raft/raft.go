@@ -5,6 +5,7 @@ import (
 	"errors"
 	"math/rand"
 	"net/rpc"
+	"slices"
 	"sync"
 	"time"
 )
@@ -88,7 +89,7 @@ type ConsensusModule struct {
 	requestQueue queue
 
 	// Signaling for replication related threads
-	ctx context.Context // used by threads to receive cancel signals
+	ctx    context.Context    // used by threads to receive cancel signals
 	cancel context.CancelFunc // the function sending those signals
 }
 
@@ -107,7 +108,8 @@ type CMOuterInterface interface {
 
 // Starts all the control threads, timed events and connections
 func (cm *ConsensusModule) Start() {
-	// Start connection manager
+	// Start connection manager and RPC server
+	go cm.startRpcServer()
 	go cm.connectionManager()
 
 	// Initialise new connections
@@ -119,14 +121,7 @@ func (cm *ConsensusModule) Start() {
 	// Start election timer
 	cm.electionTimer = *time.AfterFunc(getRandomDuration(ELEC_TIMER_MIN, ELEC_TIMER_MAX), cm.startElection)
 
-	// Start replication loop
-	go cm.replicationManager() // FIX: only needede if leader
-
-	// TODO: start rpc server
-	// TODO: start client cmd handler
-
 	// TODO: start all handlers
-
 }
 
 // Aplies the given command to the distributed cluster
@@ -193,7 +188,7 @@ func (cm *ConsensusModule) appendNewLogEntry(cmd Command) int {
  */
 
 func (cm *ConsensusModule) leader2follower() {
-	cm.cancel()	
+	cm.cancel()
 }
 
 /*
@@ -313,10 +308,17 @@ func (cm *ConsensusModule) startElection() {
 
 	ch := make(chan ElectionReply)
 
+	reqArgs := RequestVoteArgs{
+		candidateID: SRV_ID,
+		term:        cm.currentTerm,
+		checkIdx:    cm.log[len(cm.log)-1].idx,
+		checkTerm:   cm.log[len(cm.log)-1].term,
+	}
+
 	for id := range filterOut(cm.clusterConfiguration, cm.nonVotingNodes) {
 		go func(ch chan ElectionReply) {
-			res := true // TODO: request vote rpc
-			ch <- ElectionReply{voteGranted: res, id: id}
+			res := cm.sendRequestVoteRPC(id, reqArgs)
+			ch <- ElectionReply{voteGranted: res.voteGranted, id: id}
 		}(ch)
 	}
 
@@ -344,7 +346,7 @@ func (cm *ConsensusModule) startElection() {
 				isQuorumReached = positiveAnswers >= quorumOld
 			} else {
 
-				if sliceContains(cm.oldConfig, electionReply.id) {
+				if slices.Contains(cm.oldConfig, electionReply.id) {
 					if electionReply.voteGranted {
 						positiveAnswersOld++
 					} else {
@@ -352,7 +354,7 @@ func (cm *ConsensusModule) startElection() {
 					}
 				}
 
-				if sliceContains(cm.newConfig, electionReply.id) {
+				if slices.Contains(cm.newConfig, electionReply.id) {
 					if electionReply.voteGranted {
 						positiveAnswersNew++
 					} else {
@@ -396,8 +398,9 @@ func getRandomDuration(dMin, dMax time.Duration) time.Duration {
 
 // Filters map kes in the filter array
 func filterIn[K comparable, V any](m map[K]V, keys []K) (res map[K]V) {
+	res = map[K]V{}
 	for k, v := range m {
-		if sliceContains(keys, k) {
+		if slices.Contains(keys, k) {
 			res[k] = v
 		}
 	}
@@ -408,7 +411,7 @@ func filterIn[K comparable, V any](m map[K]V, keys []K) (res map[K]V) {
 // Filters slice values in the filter array
 func sliceFilterIn[T comparable](slice []T, filter []T) (res []T) {
 	for _, v := range slice {
-		if sliceContains(filter, v) {
+		if slices.Contains(filter, v) {
 			res = append(res, v)
 		}
 	}
@@ -418,7 +421,7 @@ func sliceFilterIn[T comparable](slice []T, filter []T) (res []T) {
 
 func sliceFilterOut[T comparable](slice []T, filter []T) (res []T) {
 	for _, v := range slice {
-		if !sliceContains(filter, v) {
+		if !slices.Contains(filter, v) {
 			res = append(res, v)
 		}
 	}
@@ -428,8 +431,9 @@ func sliceFilterOut[T comparable](slice []T, filter []T) (res []T) {
 
 // Filters map keys outside the filter key
 func filterOut[K comparable, V any](m map[K]V, keys []K) (res map[K]V) {
+	res = map[K]V{}
 	for k, v := range m {
-		if !sliceContains(keys, k) {
+		if !slices.Contains(keys, k) {
 			res[k] = v
 		}
 	}
@@ -442,17 +446,6 @@ func mapContains[K comparable, V any](m map[K]V, key K) bool {
 	_, ok := m[key]
 
 	return ok
-}
-
-// Tells if the slice contains the given element
-func sliceContains[T comparable](slice []T, element T) bool {
-	for _, v := range slice {
-		if v == element {
-			return true
-		}
-	}
-
-	return false
 }
 
 // Returns a slice without the given element (if there is)

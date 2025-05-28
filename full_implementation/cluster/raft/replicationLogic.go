@@ -1,7 +1,10 @@
 package raft
 
-import "time"
-import "context"
+import (
+	"context"
+	"slices"
+	"time"
+)
 
 /*
  * Replication Logic
@@ -12,7 +15,7 @@ import "context"
 // - when new logs available to replicate, signals workers to wake
 func (cm *ConsensusModule) replicationManager() {
 	// initialize workers and related infrastructure
-	
+
 	ctx, cancel := context.WithCancel(context.Background())
 
 	cm.ctx = ctx
@@ -31,9 +34,9 @@ func (cm *ConsensusModule) replicationManager() {
 
 	for {
 		select {
-			case <-cm.ctx.Done():
-				return
-			default:
+		case <-cm.ctx.Done():
+			return
+		default:
 		}
 		// When receiving command from client
 		<-cm.signalNewEntryToReplicate
@@ -57,16 +60,27 @@ func (cm *ConsensusModule) replicationManager() {
 // - NEARTBEAT_DELAY time after last replicatin, an heartbeat is sent
 func (cm *ConsensusModule) replicatorWorker(node NodeID, newLogsAvailable chan struct{}, newNode bool) {
 
-	// TODO: Send noop if just started
-
 	remoteNodeIdx := cm.currentIdx
+
+	// PERF: check no-op RPC correcnes
+	cm.sendAppendEntriesRPC(node, AppendEntriesArgs{
+		leaderID:  SRV_ID,
+		commitIdx: cm.commitIdx,
+		term:      cm.currentTerm,
+		ccIdx:     cm.log[remoteNodeIdx].idx,
+		ccTerm:    cm.log[remoteNodeIdx].term,
+		entry:     nil,
+	})
+
+	// TODO: use no-op result to help determine commit level
+
 	heartbeatTimer := time.NewTimer(HEARTBEAT_DELAY)
 
 	for {
 		select {
-			case <-cm.ctx.Done():
-				return
-			default:
+		case <-cm.ctx.Done():
+			return
+		default:
 		}
 		// start heartbeat timer
 		heartbeatTimer.Reset(HEARTBEAT_DELAY)
@@ -83,17 +97,33 @@ func (cm *ConsensusModule) replicatorWorker(node NodeID, newLogsAvailable chan s
 
 			// wait for new entries or send heartbeat
 			select {
-				case <-newLogsAvailable:
-				case <-heartbeatTimer.C:
-					// when heartbeat timer ticks, send heartbeat and continue with next iteration
-					// TODO: send heartbeat RPC
-					continue
+			case <-newLogsAvailable:
+			case <-heartbeatTimer.C:
+				// when heartbeat timer ticks, send heartbeat and continue with next iteration
+				// PERF: check heartbeat RPC correcnes
+				cm.sendAppendEntriesRPC(node, AppendEntriesArgs{
+					leaderID:  SRV_ID,
+					commitIdx: cm.commitIdx,
+					term:      cm.currentTerm,
+					ccIdx:     -1,
+					ccTerm:    -1,
+					entry:     nil,
+				})
+				continue
 			}
 		}
 
 		currentReplicatingIdx := remoteNodeIdx + 1
-		result := true // TODO: make AppendEntry rpc
-		if result {
+		// PERF: check append entreis RPC correcnes
+		result := cm.sendAppendEntriesRPC(node, AppendEntriesArgs{
+			leaderID:  SRV_ID,
+			commitIdx: cm.commitIdx,
+			term:      cm.currentTerm,
+			ccIdx:     cm.log[remoteNodeIdx].idx,
+			ccTerm:    cm.log[remoteNodeIdx].term,
+			entry:     nil,
+		})
+		if result.ccPass {
 			// if replication successful, update remote idx tracker and send ack to consensus loop to calculate majority
 			remoteNodeIdx = currentReplicatingIdx
 			cm.replicationAckChan <- ReplicationAck{
@@ -113,9 +143,9 @@ func (cm *ConsensusModule) betterConsensusTrackerLoop() {
 
 	for {
 		select {
-			case <-cm.ctx.Done():
-				return
-			default:
+		case <-cm.ctx.Done():
+			return
+		default:
 		}
 		// update ledger when receiving ack
 		ack := <-cm.replicationAckChan
@@ -132,7 +162,7 @@ func (cm *ConsensusModule) betterConsensusTrackerLoop() {
 		if !cm.isIntermediateConfig {
 			count := 0
 			for id, commitIdx := range ledger {
-				if !sliceContains(cm.nonVotingNodes, id) && ack.idx <= commitIdx {
+				if !slices.Contains(cm.nonVotingNodes, id) && ack.idx <= commitIdx {
 					count++
 				}
 			}
@@ -143,12 +173,12 @@ func (cm *ConsensusModule) betterConsensusTrackerLoop() {
 			countOld := 0
 			countNew := 0
 			for id, commitIdx := range ledger {
-				if sliceContains(cm.oldConfig, id) && ack.idx <= commitIdx {
+				if slices.Contains(cm.oldConfig, id) && ack.idx <= commitIdx {
 					countOld++
 				}
 			}
 			for id, commitIdx := range ledger {
-				if sliceContains(cm.newConfig, id) && ack.idx <= commitIdx {
+				if slices.Contains(cm.newConfig, id) && ack.idx <= commitIdx {
 					countNew++
 				}
 			}

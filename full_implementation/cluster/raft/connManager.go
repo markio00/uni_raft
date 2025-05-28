@@ -25,9 +25,9 @@ func (cm *ConsensusModule) connectionManager() {
 	for {
 		select {
 		case id := <-cm.newConnChan:
-			go cm.connectNode(id)
+			go cm.tryConnection(id)
 		case id := <-cm.delConnChan:
-			go cm.disconnectNode(id)
+			go cm.dropConnection(id)
 		}
 	}
 }
@@ -36,7 +36,7 @@ func (cm *ConsensusModule) connectionManager() {
 // - log warnings after RPC_CONN_WARN_TIMEOUT
 // - auto retry at RPC_CONN_TIMEOUT interval
 // - after RPC_CONN_RETRIES attempts, interval is increased to RPC_CONN_LONG_TIMEOUT
-func (cm *ConsensusModule) connectNode(ip NodeID) {
+func (cm *ConsensusModule) tryConnection(ip NodeID) {
 	// Use net.Dialer to provide context with timeout
 	dialer := &net.Dialer{}
 	attempts := 0
@@ -85,9 +85,51 @@ func (cm *ConsensusModule) connectNode(ip NodeID) {
 }
 
 // delete connection and
-func (cm *ConsensusModule) disconnectNode(id NodeID) {
+func (cm *ConsensusModule) dropConnection(id NodeID) {
 	cm.mu.Lock()
 	cm.clusterConfiguration[id].Close()
 	delete(cm.clusterConfiguration, id)
 	cm.mu.Unlock()
+}
+
+func (cm *ConsensusModule) sendRpcRequest(id NodeID, method string, request any, reply any) {
+
+	for {
+		// FIX: if connection attempt in progress, wait
+		if cm.clusterConfiguration[id] == nil {
+			return
+		}
+
+		// try request
+		err := cm.clusterConfiguration[id].Call("RpcObject."+method, request, reply)
+		if err == nil {
+			// if ok return
+			return
+		}
+
+		// if net fail drop connection
+		cm.dropConnection(id)
+		// reconnect
+		cm.tryConnection(id)
+
+		// and retry
+	}
+}
+
+func (cm *ConsensusModule) sendAppendEntriesRPC(id NodeID, request AppendEntriesArgs) *AppendEntriesResponse {
+
+	result := AppendEntriesResponse{}
+
+	cm.sendRpcRequest(id, "AppendEntriesRPC", request, &result)
+
+	return &result
+}
+
+func (cm *ConsensusModule) sendRequestVoteRPC(id NodeID, request RequestVoteArgs) *RequestVoteResponse {
+
+	result := RequestVoteResponse{}
+
+	cm.sendRpcRequest(id, "RequestVoteRPC", request, &result)
+
+	return &result
 }

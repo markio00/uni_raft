@@ -1,5 +1,11 @@
 package raft
 
+import (
+	"log"
+	"net"
+	"net/rpc"
+)
+
 type CMInnerInterface interface {
 	// Shared APIs
 	HandleTerm(reqTerm int, leaderID string) bool
@@ -18,6 +24,20 @@ type CMInnerInterface interface {
 
 type RpcObject struct {
 	cm CMInnerInterface
+}
+
+// Starts the rpc server for the current node
+func (cm *ConsensusModule) startRpcServer() {
+
+	rpcObj := new(RpcObject)
+	rpc.Register(rpcObj)
+	l, err := net.Listen("tcp", ":1234")
+
+	if err != nil {
+		conn, err := l.Accept()
+		go rpc.ServeConn(conn)
+		log.Fatal("listen error:", err)
+	}
 }
 
 type AppendEntriesArgs struct {
