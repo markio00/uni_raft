@@ -78,6 +78,9 @@ func (cm *ConsensusModule) tryConnection(ip NodeID) {
 			cm.mu.Lock()
 			cm.clusterConfiguration[ip] = rpc.NewClient(conn)
 			cm.mu.Unlock()
+			// ============================= idea about conn, call decoupling
+			ch <- struct{}{}
+			// ============================= idea about conn, call decoupling
 			return
 		}
 
@@ -101,7 +104,6 @@ func (cm *ConsensusModule) dropConnection(id NodeID) {
 }
 
 func (cm *ConsensusModule) sendRpcRequest(id NodeID, method string, request any, reply any) {
-
 	for {
 		// FIX: if connection attempt in progress, wait
 		if cm.clusterConfiguration[id] == nil {
@@ -118,14 +120,25 @@ func (cm *ConsensusModule) sendRpcRequest(id NodeID, method string, request any,
 		// if net fail drop connection
 		cm.dropConnection(id)
 		// reconnect
-		cm.tryConnection(id)
+		// ============================= idea about conn, call decoupling
+		ch := make(chan struct{})
+		go cm.tryConnection(id, ch)
+
+		ctx, cancel := context.WithCancel(cm.leaderCtx)
+		defer cancel()
+		// parent context used for prpagation of cancel signals
+		select {
+		case <-ctx.Done():
+			return
+		case <-ch:
+		}
+		// ============================= idea about conn, call decoupling
 
 		// and retry
 	}
 }
 
 func (cm *ConsensusModule) sendAppendEntriesRPC(id NodeID, request AppendEntriesArgs) *AppendEntriesResponse {
-
 	result := AppendEntriesResponse{}
 
 	cm.sendRpcRequest(id, "AppendEntriesRPC", request, &result)
@@ -134,7 +147,6 @@ func (cm *ConsensusModule) sendAppendEntriesRPC(id NodeID, request AppendEntries
 }
 
 func (cm *ConsensusModule) sendRequestVoteRPC(id NodeID, request RequestVoteArgs) *RequestVoteResponse {
-
 	result := RequestVoteResponse{}
 
 	cm.sendRpcRequest(id, "RequestVoteRPC", request, &result)
