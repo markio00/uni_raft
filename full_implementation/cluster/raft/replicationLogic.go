@@ -18,8 +18,9 @@ func (cm *ConsensusModule) replicationManager() {
 
 	ctx, cancel := context.WithCancel(context.Background())
 
-	cm.ctx = ctx
-	cm.cancel = cancel
+	cm.leaderCtx = ctx
+	cm.leaderCtxCancel = cancel
+	// TODO: implement ctx based cascade cancel for all leader related activities
 
 	go cm.betterConsensusTrackerLoop()
 
@@ -33,11 +34,13 @@ func (cm *ConsensusModule) replicationManager() {
 	}
 
 	for {
+		// when leader deposed, stop the loop
 		select {
-		case <-cm.ctx.Done():
+		case <-cm.leaderCtx.Done():
 			return
 		default:
 		}
+
 		// When receiving command from client
 		<-cm.signalNewEntryToReplicate
 		cm.mu.Lock()
@@ -77,11 +80,13 @@ func (cm *ConsensusModule) replicatorWorker(node NodeID, newLogsAvailable chan s
 	heartbeatTimer := time.NewTimer(HEARTBEAT_DELAY)
 
 	for {
+		// when leader deposed, stop the loop
 		select {
-		case <-cm.ctx.Done():
+		case <-cm.leaderCtx.Done():
 			return
 		default:
 		}
+
 		// start heartbeat timer
 		heartbeatTimer.Reset(HEARTBEAT_DELAY)
 
@@ -142,11 +147,13 @@ func (cm *ConsensusModule) betterConsensusTrackerLoop() {
 	ledger := map[NodeID]int{}
 
 	for {
+		// when leader deposed, stop the loop
 		select {
-		case <-cm.ctx.Done():
+		case <-cm.leaderCtx.Done():
 			return
 		default:
 		}
+
 		// update ledger when receiving ack
 		ack := <-cm.replicationAckChan
 		ledger[ack.id] = ack.idx

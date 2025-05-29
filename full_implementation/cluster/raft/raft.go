@@ -89,8 +89,8 @@ type ConsensusModule struct {
 	requestQueue queue
 
 	// Signaling for replication related threads
-	ctx    context.Context    // used by threads to receive cancel signals
-	cancel context.CancelFunc // the function sending those signals
+	leaderCtx       context.Context    // used by threads to receive cancel signals
+	leaderCtxCancel context.CancelFunc // the function sending those signals
 }
 
 /*
@@ -188,7 +188,7 @@ func (cm *ConsensusModule) appendNewLogEntry(cmd Command) int {
  */
 
 func (cm *ConsensusModule) leader2follower() {
-	cm.cancel()
+	cm.leaderCtxCancel()
 }
 
 /*

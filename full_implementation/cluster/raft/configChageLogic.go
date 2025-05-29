@@ -1,5 +1,7 @@
 package raft
 
+import "slices"
+
 /*
  * Configuration Change Logic
  */
@@ -103,11 +105,15 @@ func (cm *ConsensusModule) applyLeaderConfigChangePhase2() {
 
 	// TODO: change config infastructure to new config
 
-	// if not leader anymore (not in new config)
-	// 		set status to FOLLOWER
-	// 		destroy all replicators
-	// 		and all leader loops
+	if !slices.Contains(cm.newConfig, SRV_ID) {
+		// fall back to FFOLLOWER
+		cm.nodeStatus = FOLLOWER
 
-	// else if still leader (in new config)
-	// 		destroy replicators for old nodes
+		// TODO: kill all leader related activities
+		cm.leaderCtxCancel()
+
+	} else {
+		// TODO: destroy replicators for old nodes
+
+	}
 }

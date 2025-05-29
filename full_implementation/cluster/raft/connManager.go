@@ -37,6 +37,14 @@ func (cm *ConsensusModule) connectionManager() {
 // - auto retry at RPC_CONN_TIMEOUT interval
 // - after RPC_CONN_RETRIES attempts, interval is increased to RPC_CONN_LONG_TIMEOUT
 func (cm *ConsensusModule) tryConnection(ip NodeID) {
+	// FIX: when performing a 'Call' the underlying client may still be connecting and must wait and queue
+	// INFO: most likely to happen in the first call to RequestVoteRPC electing first leader because first call to be made
+	// since other calls are AppendEntriesRPC made by a leader that does not yet exist
+	// Unlikely to happen in leader behaviour since comms are synchronous for each node but could still happen for
+	// minority nodes still connecting during election won by the majority who was online
+	// IDEA: since no requests come in parallel, put sync chan to queue the reqeust.
+	// Remember to flush the queue when reqeust expires (e.g. vote terminated, leader deposed, ...)
+
 	// Use net.Dialer to provide context with timeout
 	dialer := &net.Dialer{}
 	attempts := 0
