@@ -44,8 +44,6 @@ type (
 	}
 )
 
-type queue struct{}
-
 type ConsensusModule struct {
 	mu sync.Mutex
 
@@ -86,8 +84,6 @@ type ConsensusModule struct {
 	commitChan           chan int // send index to commit
 	newVotingMembersChan chan NodeID
 
-	requestQueue queue
-
 	// Signaling for replication related threads
 	leaderCtx       context.Context    // used by threads to receive cancel signals
 	leaderCtxCancel context.CancelFunc // the function sending those signals
@@ -124,7 +120,7 @@ func (cm *ConsensusModule) Start() {
 	// TODO: start all handlers
 }
 
-// Aplies the given command to the distributed cluster
+// Applies the given command to the distributed cluster
 // The call blocks until the command is committed to the cluster returning a nil
 // If the current node is not the leader, an error redirectng to the correct leader will be returned
 // In exceptional circumstances when committing fails, an explainative error will be returned instead
@@ -231,16 +227,26 @@ func (cm *ConsensusModule) ResetElectionTimer() {
  * AppendEntries APIs
  */
 
-// Perform consistency ccheck for safely appending logs and return the boolean result
+// Perform consistency check to safely append logs and return the boolean result
 func (cm *ConsensusModule) ConsistencyCheck(ccIdx, ccTerm int) bool {
 	cm.mu.Lock()
 	defer cm.mu.Unlock()
+	
+	matchingEntryIndex := -1
+	// Search for a matching entry
+	for i, _ := range cm.log {
+		currEntry := cm.log[len(cm.log)-i-1]
+		if currEntry.idx == ccIdx && currEntry.term == ccTerm {
+			matchingEntryIndex = i
+			break
+		}
+	}
 
-	lastEntry := cm.log[len(cm.log)-1]
+	if matchingEntryIndex != -1 {
+		cm.log = cm.log[0:matchingEntryIndex]
+	}
 
-	// FIX: delete entries if no match ??
-
-	return lastEntry.idx == ccIdx && lastEntry.term == ccTerm
+	return matchingEntryIndex != -1
 }
 
 func (cm *ConsensusModule) appendToLog(entry logEntry) {
@@ -380,84 +386,6 @@ func (cm *ConsensusModule) startElection() {
 	}
 }
 
-/*
- * Utility functions
- */
-
-// Get a random positive duration with Millisecond granularity in a given range of durations
-//   - when min > max, the vaules are inverted so the result will always be positive
-func getRandomDuration(dMin, dMax time.Duration) time.Duration {
-	tMin := dMin.Milliseconds()
-	tMax := dMax.Milliseconds()
-
-	rnd := rand.New(rand.NewSource(time.Now().UnixNano()))
-	n := rnd.Int63n(tMax-tMin+1) + tMin
-
-	return time.Duration(n).Abs() * time.Microsecond
-}
-
-// Filters map kes in the filter array
-func filterIn[K comparable, V any](m map[K]V, keys []K) (res map[K]V) {
-	res = map[K]V{}
-	for k, v := range m {
-		if slices.Contains(keys, k) {
-			res[k] = v
-		}
-	}
-
-	return res
-}
-
-// Filters slice values in the filter array
-func sliceFilterIn[T comparable](slice []T, filter []T) (res []T) {
-	for _, v := range slice {
-		if slices.Contains(filter, v) {
-			res = append(res, v)
-		}
-	}
-
-	return res
-}
-
-func sliceFilterOut[T comparable](slice []T, filter []T) (res []T) {
-	for _, v := range slice {
-		if !slices.Contains(filter, v) {
-			res = append(res, v)
-		}
-	}
-
-	return res
-}
-
-// Filters map keys outside the filter key
-func filterOut[K comparable, V any](m map[K]V, keys []K) (res map[K]V) {
-	res = map[K]V{}
-	for k, v := range m {
-		if !slices.Contains(keys, k) {
-			res[k] = v
-		}
-	}
-
-	return res
-}
-
-// Tells if the map contains the given key
-func mapContains[K comparable, V any](m map[K]V, key K) bool {
-	_, ok := m[key]
-
-	return ok
-}
-
-// Returns a slice without the given element (if there is)
-func sliceDelete[T comparable](slice []T, element T) []T {
-	for i, v := range slice {
-		if v == element {
-			return append(slice[:i], slice[i+1:]...)
-		}
-	}
-
-	return slice
-}
 
 func (cm *ConsensusModule) getQuorums() (int, int) {
 	if !cm.isIntermediateConfig {

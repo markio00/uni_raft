@@ -105,7 +105,7 @@ func (cm *ConsensusModule) replicatorWorker(node NodeID, newLogsAvailable chan s
 			case <-newLogsAvailable:
 			case <-heartbeatTimer.C:
 				// when heartbeat timer ticks, send heartbeat and continue with next iteration
-				// PERF: check heartbeat RPC correcnes
+				// PERF: check heartbeat RPC correctness
 				cm.sendAppendEntriesRPC(node, AppendEntriesArgs{
 					leaderID:  SRV_ID,
 					commitIdx: cm.commitIdx,
@@ -119,7 +119,7 @@ func (cm *ConsensusModule) replicatorWorker(node NodeID, newLogsAvailable chan s
 		}
 
 		currentReplicatingIdx := remoteNodeIdx + 1
-		// PERF: check append entreis RPC correcnes
+		// PERF: check append entries RPC correctness
 		result := cm.sendAppendEntriesRPC(node, AppendEntriesArgs{
 			leaderID:  SRV_ID,
 			commitIdx: cm.commitIdx,
@@ -129,7 +129,7 @@ func (cm *ConsensusModule) replicatorWorker(node NodeID, newLogsAvailable chan s
 			entry:     nil,
 		})
 		if result.ccPass {
-			// if replication successful, update remote idx tracker and send ack to consensus loop to calculate majority
+			// if replication successful, update remote idx tracker and send ack to consensus tracker to calculate majority
 			remoteNodeIdx = currentReplicatingIdx
 			cm.replicationAckChan <- ReplicationAck{
 				id:  node,
@@ -149,9 +149,9 @@ func (cm *ConsensusModule) betterConsensusTrackerLoop() {
 	for {
 		// when leader deposed, stop the loop
 		select {
-		case <-cm.leaderCtx.Done():
-			return
-		default:
+			case <-cm.leaderCtx.Done():
+				return
+			default:
 		}
 
 		// update ledger when receiving ack

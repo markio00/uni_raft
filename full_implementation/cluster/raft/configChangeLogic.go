@@ -6,7 +6,7 @@ import "slices"
  * Configuration Change Logic
  */
 
-// Apply the configuratino change to a receiving follower
+// Apply the configuration change to a receiving follower
 func (cm *ConsensusModule) applyFollowerConfigChange(cfg Configuration) {
 
 	// PERF: Merge with leader CC (phase 1 and 2)
@@ -41,9 +41,7 @@ func (cm *ConsensusModule) applyFollowerConfigChange(cfg Configuration) {
 				cm.newConnChan <- NodeID(newNode)
 			}
 		}
-	}
-
-	if cfg[0] == "NC" {
+	} else if cfg[0] == "NC" {
 		// delete connections for the old nodes
 		for _, oldNode := range cm.oldConfig {
 			found := false
@@ -84,7 +82,7 @@ func (cm *ConsensusModule) prepareLeaderConfigChange(cfg Configuration) Command 
 		}
 	}
 
-	// wait for all nodes to get upt to commit level and gain voting privileges
+	// wait for all nodes to get up to commit level and gain voting privileges
 	for range cm.nonVotingNodes {
 		<-cm.newVotingMembersChan
 	}
@@ -106,11 +104,11 @@ func (cm *ConsensusModule) applyLeaderConfigChangePhase2() {
 	// TODO: change config infastructure to new config
 
 	if !slices.Contains(cm.newConfig, SRV_ID) {
-		// fall back to FFOLLOWER
+		// fall back to FOLLOWER
 		cm.nodeStatus = FOLLOWER
 
 		// TODO: kill all leader related activities
-		cm.leaderCtxCancel()
+		cm.leader2follower()
 
 	} else {
 		// TODO: destroy replicators for old nodes

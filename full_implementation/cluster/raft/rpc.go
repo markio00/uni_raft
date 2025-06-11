@@ -35,9 +35,12 @@ func (cm *ConsensusModule) startRpcServer() {
 
 	if err != nil {
 		conn, err := l.Accept()
+		if err != nil {
+			log.Fatal("accept error:", err)
+		}
 		go rpc.ServeConn(conn)
-		log.Fatal("listen error:", err)
-	}
+	} 
+	log.Fatal("listen error:", err)
 }
 
 type AppendEntriesArgs struct {
@@ -67,7 +70,7 @@ func (obj *RpcObject) AppendEntriesRPC(args AppendEntriesArgs, resp *AppendEntri
 	}
 
 	// handle payload
-	// - if empty => hartbeat => ignore
+	// - if empty => heartbeat => ignore
 	// - apply entries otherwise
 	if entry := args.entry; entry != nil {
 		obj.cm.AppendEntry(*entry)
