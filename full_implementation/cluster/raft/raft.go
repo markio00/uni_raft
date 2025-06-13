@@ -160,6 +160,8 @@ func (cm *ConsensusModule) appendAndReplicate(cmd Command) error { // TODO: Send
 	close(ch)
 	delete(cm.commitSignalingChans, idx)
 
+	// TODO: #712.1 Apply to state (trigger callback)
+
 	return response
 }
 

@@ -197,7 +197,8 @@ func (cm *ConsensusModule) betterConsensusTrackerLoop() {
 		if isQuorumReached {
 			cm.commitIdx = ack.idx
 			cm.commitSignalingChans[ack.idx] <- nil
-			// TODO: apply to state (trigger callback)
+			// TODO: #712.2 Apply to state (trigger callback)
+			//              Maybe state could be updated directly [here](#712.1)
 
 			if cm.isIntermediateConfig && cm.lastConfigChangeIdx <= cm.commitIdx {
 				// start phase 2
