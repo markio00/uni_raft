@@ -322,6 +322,13 @@ func (cm *ConsensusModule) startElection() {
 	}
 
 	for id := range filterOut(cm.clusterConfiguration, cm.nonVotingNodes) {
+		// FIX: These goroutines should be time-bounded.
+	  //      Otherwise it may happen that another
+		//      election starts while some goroutines are still waiting
+		//      for a response to their RPC from some old election process.
+		//      Maybe just sending the RPC result on an ephemeral channel c
+	  //      and then wrap c in a select statement along with a timer
+		//      would be fine
 		go func(ch chan ElectionReply) {
 			res := cm.sendRequestVoteRPC(id, reqArgs)
 			ch <- ElectionReply{voteGranted: res.voteGranted, id: id}
