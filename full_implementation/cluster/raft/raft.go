@@ -310,6 +310,12 @@ func (cm *ConsensusModule) VoteFor(candidateID NodeID) bool {
  */
 
 func (cm *ConsensusModule) startElection() {
+	// FIX: How to stop this goroutine
+	//      if a valid AppendEntry (or heartbeat)
+	//      is received during an election process?
+	//      Couldn't we use another channel
+	//      with the only purpose to shutdown this goroutine?
+
 	cm.nodeStatus = CANDIDATE
 
 	ch := make(chan ElectionReply)
