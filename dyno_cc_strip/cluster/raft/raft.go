@@ -2,6 +2,7 @@ package raft
 
 import (
 	"context"
+	"errors"
 	"net/rpc"
 	"sync"
 	"time"
@@ -44,6 +45,9 @@ type (
 type ConsensusModule struct {
 	mu                 sync.Mutex
 	multiElectionMutex sync.Mutex
+
+	// Filesystem related stuff
+	opsInProgress map[path]opType
 
 	// Raft state fields
 	nodeStatus  nodeStatus
@@ -106,6 +110,7 @@ func (cm *ConsensusModule) Start() {
 	// TODO: start all handlers
 }
 
+
 // Applies the given command to the distributed cluster
 // The call blocks until the command is committed to the cluster returning a nil
 // If the current node is not the leader, an error redirectng to the correct leader will be returned
@@ -114,9 +119,19 @@ func (cm *ConsensusModule) Start() {
 func (cm *ConsensusModule) ApplyCommand(cmd Command) error {
 	// INFO: only triggered when LEADER
 
-	// TODO: check command consistency
-	// - if there's not a conflicting request in progress
-	// - if the operation is consistent with existance of the target resource
+	if !isCmdValid(cmd) {
+		return errors.New("Provided command is not valid")
+	}
+
+	path := getPath(cmd)
+	
+	if _, ok := cm.opsInProgress[path] ; ok {
+		if doOpTypesConflict(getOpType(cmd), cm.opsInProgress[path]) {
+			return errors.New("A conflicting operation on requested path is already in progress")
+		}
+	}
+
+	// TODO: check if the operation is consistent with existance of the target resource
 
 	// TODO: Send heartbeat for read-only requests
 
@@ -211,7 +226,7 @@ func (cm *ConsensusModule) ConsistencyCheck(ccIdx, ccTerm int) bool {
 
 	matchingEntryIndex := -1
 	// Search for a matching entry
-	for i, _ := range cm.log {
+	for i := range cm.log {
 		currEntry := cm.log[len(cm.log)-i-1]
 		if currEntry.idx == ccIdx && currEntry.term == ccTerm {
 			matchingEntryIndex = i
