@@ -111,9 +111,15 @@ func (cm *ConsensusModule) sendRpcRequest(id NodeID, method string, request any,
 		}
 
 		// try request
-		err := cm.clusterConfiguration[id].Call("RpcObject."+method, request, reply)
-		if err == nil {
-			// if ok return
+		done := make(chan *rpc.Call)
+		cm.clusterConfiguration[id].Go("RpcObject."+method, request, reply, done)
+
+		select {
+		case call := <- done:
+			if call.Error == nil {
+				return
+			}
+		case <- cm.ctx.Done():
 			return
 		}
 
@@ -124,7 +130,7 @@ func (cm *ConsensusModule) sendRpcRequest(id NodeID, method string, request any,
 		ch := make(chan struct{})
 		go cm.tryConnection(id, ch)
 
-		ctx, cancel := context.WithCancel(cm.leaderCtx)
+		ctx, cancel := context.WithCancel(cm.ctx)
 		defer cancel()
 		// parent context used for prpagation of cancel signals
 		select {

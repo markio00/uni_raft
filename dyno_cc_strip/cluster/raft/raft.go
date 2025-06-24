@@ -3,7 +3,6 @@ package raft
 import (
 	"context"
 	"net/rpc"
-	"slices"
 	"sync"
 	"time"
 )
@@ -43,7 +42,8 @@ type (
 )
 
 type ConsensusModule struct {
-	mu sync.Mutex
+	mu                 sync.Mutex
+	multiElectionMutex sync.Mutex
 
 	// Raft state fields
 	nodeStatus  nodeStatus
@@ -55,6 +55,7 @@ type ConsensusModule struct {
 	// Cluster config related fields
 	clusterConfiguration map[NodeID]*rpc.Client
 	quorum               int
+	clusterSize          int
 
 	// Election related fields
 	electionTimer    time.Timer
@@ -73,9 +74,9 @@ type ConsensusModule struct {
 	replicationAckChan chan ReplicationAck
 	commitChan         chan int // send index to commit
 
-	// Signaling for replication related threads
-	leaderCtx       context.Context    // used by threads to receive cancel signals
-	leaderCtxCancel context.CancelFunc // the function sending those signals
+	// Signaling
+	ctx       context.Context    // used by threads to receive cancel signals
+	ctxCancel context.CancelFunc // the function sending those signals
 }
 
 /*
@@ -160,7 +161,7 @@ func (cm *ConsensusModule) appendNewLogEntry(cmd Command) int {
  */
 
 func (cm *ConsensusModule) leader2follower() {
-	cm.leaderCtxCancel()
+	cm.ctxCancel()
 }
 
 /*
@@ -227,19 +228,10 @@ func (cm *ConsensusModule) ConsistencyCheck(ccIdx, ccTerm int) bool {
 
 func (cm *ConsensusModule) appendToLog(entry logEntry) {
 	cm.log = append(cm.log, entry)
-
-	if entry.cmd[0] == "CC" {
-		cm.lastConfigChangeIdx = cm.currentIdx
-	}
 }
 
 // Append already consistent entry to the local log and apply configuration change if one is detected
 func (cm *ConsensusModule) AppendEntry(entry logEntry) {
-	if entry.cmd[0] == "CC" {
-		// if config change detected, start the application process
-		cm.applyFollowerConfigChange(Configuration(entry.cmd[1:]))
-	}
-
 	cm.appendToLog(entry)
 }
 
@@ -286,11 +278,18 @@ func (cm *ConsensusModule) VoteFor(candidateID NodeID) bool {
  */
 
 func (cm *ConsensusModule) startElection() {
-	// FIX: How to stop this goroutine
-	//      if a valid AppendEntry (or heartbeat)
-	//      is received during an election process?
-	//      Couldn't we use another channel
-	//      with the only purpose to shutdown this goroutine?
+
+	// stop previous election if timeout occurred
+	if cm.nodeStatus == CANDIDATE {
+		cm.ctxCancel()
+	}
+
+	cm.multiElectionMutex.Lock()
+	cm.multiElectionMutex.Unlock()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cm.ctx = ctx
+	cm.ctxCancel = cancel
 
 	cm.ResetElectionTimer()
 
@@ -313,7 +312,10 @@ func (cm *ConsensusModule) startElection() {
 
 		go func(ch chan ElectionReply) {
 			res := cm.sendRequestVoteRPC(id, reqArgs)
-			ch <- ElectionReply{voteGranted: res.voteGranted, id: id}
+			select {
+			case ch <- ElectionReply{voteGranted: res.voteGranted, id: id}:
+			default:
+			}
 		}(ch)
 	}
 
@@ -322,14 +324,15 @@ func (cm *ConsensusModule) startElection() {
 
 	electionWon := false
 	for votesGranted < cm.quorum || totVotes-votesGranted >= cm.clusterSize-cm.quorum+1 {
+		cm.multiElectionMutex.Lock()
 		select {
-		case <-cm.receivedAE:
-			electionWon = false
-			break
-		case <-timer.C:
-			go startElection()
+		case <-cm.ctx.Done():
+			cm.nodeStatus = FOLLOWER
+			cm.ResetElectionTimer()
+			cm.multiElectionMutex.Unlock()
 			return
 		case response := <-ch:
+			cm.multiElectionMutex.Unlock()
 			totVotes++
 			if response.voteGranted {
 				votesGranted++
@@ -342,7 +345,7 @@ func (cm *ConsensusModule) startElection() {
 
 	if electionWon {
 		cm.nodeStatus = LEADER
-
+		cm.electionTimer.Stop()
 		go cm.replicationManager()
 	} else {
 		cm.nodeStatus = FOLLOWER

@@ -1,7 +1,6 @@
 package raft
 
 import (
-	"context"
 	"time"
 )
 
@@ -17,10 +16,6 @@ func (cm *ConsensusModule) replicationManager() {
 
 	cm.appendNewLogEntry(Command{"NOOP"})
 
-	ctx, cancel := context.WithCancel(context.Background())
-
-	cm.leaderCtx = ctx
-	cm.leaderCtxCancel = cancel
 	// TODO: implement ctx based cascade cancel for all leader related activities
 
 	go cm.betterConsensusTrackerLoop()
@@ -44,7 +39,7 @@ func (cm *ConsensusModule) replicationManager() {
 	for {
 		select {
 		// when leader deposed, stop the loop
-		case <-cm.leaderCtx.Done():
+		case <-cm.ctx.Done():
 			return
 		// When receiving command from client
 		case <-cm.signalNewEntryToReplicate:
@@ -74,7 +69,7 @@ func (cm *ConsensusModule) replicatorWorker(node NodeID, newLogsAvailable chan s
 	for {
 		// when leader deposed, stop the loop
 		select {
-		case <-cm.leaderCtx.Done():
+		case <-cm.ctx.Done():
 			return
 		default:
 		}
@@ -134,7 +129,7 @@ func (cm *ConsensusModule) betterConsensusTrackerLoop() {
 	for {
 		// when leader deposed, stop the loop
 		select {
-		case <-cm.leaderCtx.Done():
+		case <-cm.ctx.Done():
 			return
 		default:
 		}
@@ -149,7 +144,7 @@ func (cm *ConsensusModule) betterConsensusTrackerLoop() {
 		}
 
 		// check commit consensus
-		countReplicas := 0
+		countReplicas := 1 // leader obviously stores the entry
 		for _, commitIdx := range ledger {
 			if ack.idx <= commitIdx {
 				countReplicas++
