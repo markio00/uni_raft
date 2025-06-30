@@ -40,10 +40,15 @@ type (
 		id  NodeID
 		idx int
 	}
+	Conn = struct {
+		client     *rpc.Client
+		canConnect chan struct{}
+		mu         *sync.Mutex
+	}
 )
 
 type ConsensusModule struct {
-	mu                 sync.Mutex
+	mu                 sync.Mutex // FIX: delete mutex and sub with narrow scoped ones
 	multiElectionMutex sync.Mutex
 
 	// Filesystem related stuff
@@ -57,26 +62,20 @@ type ConsensusModule struct {
 	log         []logEntry
 
 	// Cluster config related fields
-	clusterConfiguration map[NodeID]*rpc.Client
+	clusterConfiguration map[NodeID]*Conn
 	quorum               int
 	clusterSize          int
 
 	// Election related fields
-	electionTimer    time.Timer
-	lastRpcTimestamp time.Time
-	votedFor         NodeID
+	electionTimer time.Timer
+	votedFor      NodeID
 
 	// Communication with action handler goroutine
 	signalNewEntryToReplicate chan struct{}
 	commitSignalingChans      map[int]chan error
 
-	// Communication with the connection manager
-	newConnChan chan NodeID // add new connections
-	delConnChan chan NodeID // delete old connections
-
 	// Communication with commit handler goroutine
 	replicationAckChan chan ReplicationAck
-	commitChan         chan int // send index to commit
 
 	// Signaling
 	ctx       context.Context    // used by threads to receive cancel signals
@@ -91,25 +90,64 @@ type ConsensusModule struct {
 type CMOuterInterface interface {
 	NewRaftInstance(cfg Configuration) CMOuterInterface
 	Start()
-	ApplyCommand(cmd Command)
+	ApplyCommand(cmd Command) error
 }
 
-// TODO: write Setup function
+func (cm *ConsensusModule) NewRaftInstance(cfg Configuration) CMOuterInterface {
+	return &ConsensusModule{
+		mu:                 sync.Mutex{},
+		multiElectionMutex: sync.Mutex{},
+
+		opsInProgress: map[path]opType{},
+
+		nodeStatus:  FOLLOWER,
+		currentTerm: 0,
+		currentIdx:  0,
+		commitIdx:   0,
+		log:         make([]logEntry, 0),
+
+		quorum:      len(cfg)/2 + 1,
+		clusterSize: len(cfg),
+		clusterConfiguration: func(cfg Configuration) map[NodeID]*Conn {
+			m := map[NodeID]*Conn{}
+			for _, k := range cfg {
+				m[k] = &Conn{
+					client:     nil,
+					mu:         &sync.Mutex{},
+					canConnect: make(chan struct{}),
+				}
+			}
+			return m
+		}(cfg),
+
+		electionTimer: time.Timer{},
+		votedFor:      "",
+
+		signalNewEntryToReplicate: make(chan struct{}),
+		commitSignalingChans:      make(map[int]chan error),
+
+		replicationAckChan: make(chan ReplicationAck),
+
+		ctx:       context.TODO(),
+		ctxCancel: func() {},
+	}
+}
 
 // Starts all the control threads, timed events and connections
 func (cm *ConsensusModule) Start() {
 	// Start connection manager and RPC server
 	go cm.startRpcServer()
-	go cm.connectionManager()
 
-	// TODO: Initialise new connections
+	for node := range cm.clusterConfiguration {
+		go cm.tryConnection(node)
+	}
 
 	// Start election timer
-	cm.electionTimer = *time.AfterFunc(getRandomDuration(ELEC_TIMER_MIN, ELEC_TIMER_MAX), cm.startElection)
-
-	// TODO: start all handlers
+	cm.electionTimer = *time.AfterFunc(
+		getRandomDuration(ELEC_TIMER_MIN, ELEC_TIMER_MAX),
+		cm.startElection,
+	)
 }
-
 
 // Applies the given command to the distributed cluster
 // The call blocks until the command is committed to the cluster returning a nil
@@ -124,12 +162,14 @@ func (cm *ConsensusModule) ApplyCommand(cmd Command) error {
 	}
 
 	path := getPath(cmd)
-	
-	if _, ok := cm.opsInProgress[path] ; ok {
+
+	if _, ok := cm.opsInProgress[path]; ok {
 		if doOpTypesConflict(getOpType(cmd), cm.opsInProgress[path]) {
 			return errors.New("A conflicting operation on requested path is already in progress")
 		}
 	}
+
+	cm.opsInProgress[path] = getOpType(cmd)
 
 	// TODO: check if the operation is consistent with existance of the target resource
 
@@ -211,7 +251,6 @@ func (cm *ConsensusModule) ResetElectionTimer() {
 	d := getRandomDuration(ELEC_TIMER_MIN, ELEC_TIMER_MAX)
 	cm.mu.Lock()
 	cm.electionTimer.Reset(d)
-	cm.lastRpcTimestamp = time.Now()
 	cm.mu.Unlock()
 }
 
@@ -251,23 +290,12 @@ func (cm *ConsensusModule) AppendEntry(entry logEntry) {
 }
 
 func (cm *ConsensusModule) SyncCommitIdx(leaderCommitIdx int) {
-	oldCommitIdx := cm.commitIdx
 	cm.commitIdx = leaderCommitIdx
-
-	for idx := range leaderCommitIdx - oldCommitIdx {
-		cm.commitChan <- oldCommitIdx + idx + 1
-	}
 }
 
 /*
  * RequestVote APIs
  */
-
-// Tell if the request came in the appropriate election window
-func (cm *ConsensusModule) ValidVoteRequest() bool {
-	// tell if the minimum election timer has elapsed from the last RPC was received
-	return time.Now().After(cm.lastRpcTimestamp.Add(ELEC_TIMER_MIN))
-}
 
 // Check if the candidate has appropriate term and committed index to be eligible for vote
 func (cm *ConsensusModule) CanVoteFor(checkIdx, checkTerm int) bool {

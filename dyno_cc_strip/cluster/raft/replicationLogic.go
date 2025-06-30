@@ -16,8 +16,6 @@ func (cm *ConsensusModule) replicationManager() {
 
 	cm.appendNewLogEntry(Command{"NOOP"})
 
-	// TODO: implement ctx based cascade cancel for all leader related activities
-
 	go cm.betterConsensusTrackerLoop()
 
 	replicatorChannels := map[NodeID]chan struct{}{}

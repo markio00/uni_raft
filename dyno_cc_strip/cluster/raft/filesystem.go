@@ -13,7 +13,7 @@ func isCmdValid(cmd Command) bool {
 
 	isCmdFound := false
 	var mainCmd string
-	supportedCmds := []string{"CREATE", "DELETE", "READ", "UPDATE"}
+	supportedCmds := []string{"CREATE", "READ", "UPDATE", "DELETE"}
 
 	if len(cmd) < 2 || len(cmd) > 3 {
 		return false
@@ -46,8 +46,8 @@ func isCmdValid(cmd Command) bool {
 }
 
 func getPath(cmd Command) path {
-	
-	if ! isCmdValid(cmd) {
+
+	if !isCmdValid(cmd) {
 		return ""
 	} else {
 		return path(cmd[1])
@@ -66,7 +66,7 @@ func getOpType(cmd Command) opType {
 }
 
 func doOpTypesConflict(opType1 opType, opType2 opType) bool {
-	return opType1 == READ  && opType2 == WRITE ||
-	       opType1 == WRITE && opType2 == READ  ||
-	       opType1 == WRITE && opType2 == WRITE
+	return opType1 == READ && opType2 == WRITE ||
+		opType1 == WRITE && opType2 == READ ||
+		opType1 == WRITE && opType2 == WRITE
 }

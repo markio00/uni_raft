@@ -17,33 +17,11 @@ const (
 	SRV_ID                = "" // TODO: add server ip constant
 )
 
-// Connection manager loop
-// - receives connection related events through channels and applies the repated action
-// - adds connections
-// - deletes connections
-func (cm *ConsensusModule) connectionManager() {
-	for {
-		select {
-		case id := <-cm.newConnChan:
-			go cm.tryConnection(id, make(chan struct{}))
-		case id := <-cm.delConnChan:
-			go cm.dropConnection(id)
-		}
-	}
-}
-
 // connects to a new node's RPC server
 // - log warnings after RPC_CONN_WARN_TIMEOUT
 // - auto retry at RPC_CONN_TIMEOUT interval
 // - after RPC_CONN_RETRIES attempts, interval is increased to RPC_CONN_LONG_TIMEOUT
-func (cm *ConsensusModule) tryConnection(ip NodeID, ch chan struct{}) {
-	// FIX: when performing a 'Call' the underlying client may still be connecting and must wait and queue
-	// INFO: most likely to happen in the first call to RequestVoteRPC electing first leader because first call to be made
-	// since other calls are AppendEntriesRPC made by a leader that does not yet exist
-	// Unlikely to happen in leader behaviour since comms are synchronous for each node but could still happen for
-	// minority nodes still connecting during election won by the majority who was online
-	// IDEA: since no requests come in parallel, put sync chan to queue the reqeust.
-	// Remember to flush the queue when reqeust expires (e.g. vote terminated, leader deposed, ...)
+func (cm *ConsensusModule) tryConnection(ip NodeID) {
 
 	// Use net.Dialer to provide context with timeout
 	dialer := &net.Dialer{}
@@ -55,9 +33,9 @@ func (cm *ConsensusModule) tryConnection(ip NodeID, ch chan struct{}) {
 		// After RPC_CONN_RETRIES retry, wait longer
 		attempts++
 		if attempts > RPC_CONN_RETRIES {
-			retryTimer.Reset(RPC_CONN_TIMEOUT)
-		} else {
 			retryTimer.Reset(RPC_CONN_LONG_TIMEOUT)
+		} else {
+			retryTimer.Reset(RPC_CONN_TIMEOUT)
 		}
 
 		// Create the timed-out context
@@ -66,26 +44,26 @@ func (cm *ConsensusModule) tryConnection(ip NodeID, ch chan struct{}) {
 
 		// Send a warning if connection takes long
 		warnTimer := time.AfterFunc(RPC_CONN_WARN_TIMEOUT, func() {
-			slog.Warn("Server %v unresponsive after %v", ip, RPC_CONN_WARN_TIMEOUT)
+			slog.Warn("Server %v unresponsive after %v", string(ip), RPC_CONN_WARN_TIMEOUT)
 		})
 
 		// Try connection
 		conn, err := dialer.DialContext(ctx, "tcp", string(ip)+RPC_PORT)
 		if err == nil {
 			// if conn successful delete context and add client to the configuration
-			slog.Info("Connection to server %v successful", ip)
+			slog.Info("Connection to server %v successful", string(ip))
 			warnTimer.Stop()
 			cm.mu.Lock()
-			cm.clusterConfiguration[ip] = rpc.NewClient(conn)
+			cm.clusterConfiguration[ip].client = rpc.NewClient(conn)
 			cm.mu.Unlock()
-			// ============================= idea about conn, call decoupling
-			ch <- struct{}{}
-			// ============================= idea about conn, call decoupling
+
+			// signal conenction now available
+			cm.clusterConfiguration[ip].canConnect <- struct{}{}
 			return
 		}
 
 		// if timeout or conn err occurrs, log it and cancel the context
-		slog.Warn("Couldn't connect to %v: %v", ip, err)
+		slog.Warn("Couldn't connect to %v: %v", string(ip), err)
 		cancel()
 
 		// wait for retry timer
@@ -98,49 +76,46 @@ func (cm *ConsensusModule) tryConnection(ip NodeID, ch chan struct{}) {
 // delete connection and
 func (cm *ConsensusModule) dropConnection(id NodeID) {
 	cm.mu.Lock()
-	cm.clusterConfiguration[id].Close()
+	cm.clusterConfiguration[id].client.Close()
 	delete(cm.clusterConfiguration, id)
 	cm.mu.Unlock()
 }
 
 func (cm *ConsensusModule) sendRpcRequest(id NodeID, method string, request any, reply any) {
+
+	cm.clusterConfiguration[id].mu.Lock()
+	defer cm.clusterConfiguration[id].mu.Unlock()
+
 	for {
-		// FIX: if connection attempt in progress, wait
-		if cm.clusterConfiguration[id] == nil {
-			return
+		// if try conn in progress wait
+		if cm.clusterConfiguration[id].client == nil {
+			select {
+			// if cancelation signal, early return
+			case <-cm.ctx.Done():
+				return
+			// when try conn terminates proceed with call request
+			case <-cm.clusterConfiguration[id].canConnect:
+			}
 		}
 
 		// try request
 		done := make(chan *rpc.Call)
-		cm.clusterConfiguration[id].Go("RpcObject."+method, request, reply, done)
+		cm.clusterConfiguration[id].client.Go("RpcObject."+method, request, reply, done)
 
 		select {
-		case call := <- done:
+		// if call succeed, return with correct result
+		case call := <-done:
 			if call.Error == nil {
 				return
 			}
-		case <- cm.ctx.Done():
+		// if cancelation signal, early return
+		case <-cm.ctx.Done():
 			return
 		}
 
-		// if net fail drop connection
+		// if call error, crop conn and try new one
 		cm.dropConnection(id)
-		// reconnect
-		// ============================= idea about conn, call decoupling
-		ch := make(chan struct{})
-		go cm.tryConnection(id, ch)
-
-		ctx, cancel := context.WithCancel(cm.ctx)
-		defer cancel()
-		// parent context used for prpagation of cancel signals
-		select {
-		case <-ctx.Done():
-			return
-		case <-ch:
-		}
-		// ============================= idea about conn, call decoupling
-
-		// and retry
+		go cm.tryConnection(id)
 	}
 }
 
