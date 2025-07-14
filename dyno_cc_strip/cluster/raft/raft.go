@@ -3,6 +3,7 @@ package raft
 import (
 	"context"
 	"errors"
+	"fmt"
 	"net/rpc"
 	"sync"
 	"time"
@@ -53,6 +54,7 @@ type ConsensusModule struct {
 
 	// Filesystem related stuff
 	opsInProgress map[path]opType
+	files map[path]string
 
 	// Raft state fields
 	nodeStatus  nodeStatus
@@ -90,7 +92,7 @@ type ConsensusModule struct {
 type CMOuterInterface interface {
 	NewRaftInstance(cfg Configuration) CMOuterInterface
 	Start()
-	ApplyCommand(cmd Command) error
+	ApplyCommand(cmd Command) (string, error)
 }
 
 func (cm *ConsensusModule) NewRaftInstance(cfg Configuration) CMOuterInterface {
@@ -99,6 +101,7 @@ func (cm *ConsensusModule) NewRaftInstance(cfg Configuration) CMOuterInterface {
 		multiElectionMutex: sync.Mutex{},
 
 		opsInProgress: map[path]opType{},
+		files: map[path]string{},
 
 		nodeStatus:  FOLLOWER,
 		currentTerm: 0,
@@ -154,26 +157,35 @@ func (cm *ConsensusModule) Start() {
 // If the current node is not the leader, an error redirectng to the correct leader will be returned
 // In exceptional circumstances when committing fails, an explainative error will be returned instead
 
-func (cm *ConsensusModule) ApplyCommand(cmd Command) error {
+func (cm *ConsensusModule) ApplyCommand(cmd Command) (string, error) {
 	// INFO: only triggered when LEADER
 
 	if !isCmdValid(cmd) {
-		return errors.New("Provided command is not valid")
+		return "", fmt.Errorf("Command %s is not valid", cmd[0])
 	}
 
 	path := getPath(cmd)
+	opType := getOpType(cmd)
 
 	if _, ok := cm.opsInProgress[path]; ok {
-		if doOpTypesConflict(getOpType(cmd), cm.opsInProgress[path]) {
-			return errors.New("A conflicting operation on requested path is already in progress")
+		if doOpTypesConflict(opType, cm.opsInProgress[path]) {
+			return "", fmt.Errorf("A conflicting operation on %s is already in progress", cmd[1])
 		}
 	}
 
 	cm.opsInProgress[path] = getOpType(cmd)
 
-	// TODO: check if the operation is consistent with existance of the target resource
+	_, ok := cm.files[cmd[1]]
 
-	// TODO: Send heartbeat for read-only requests
+	if cmd[0] == "CREATE" && ok {
+		cm.opsInProgress[cmd[1]] = NONE
+		return "", errors.New("File already exists")
+	} else if !ok {
+		cm.opsInProgress[cmd[1]] = NONE
+		return "", errors.New("File doesn't exist")
+	}
+
+	// TODO: Send heartbeat for read-only requests (Chapter 8 of Raft)
 
 	// create and append log entry, return related idx
 	idx := cm.appendNewLogEntry(cmd)
@@ -186,13 +198,35 @@ func (cm *ConsensusModule) ApplyCommand(cmd Command) error {
 	cm.signalNewEntryToReplicate <- struct{}{}
 
 	// wait for commit signal on dedicated channel, then release resources
-	response := <-ch
-	close(ch)
+	<-ch
 	delete(cm.commitSignalingChans, idx)
 
-	// TODO: #712.1 Apply to state (trigger callback)
+	cm.applyToState(cmd)
 
-	return response
+	cm.opsInProgress[cmd[1]] = NONE // INFO: Concurrent reads are not supported
+
+	if opType == READ {
+		return cm.files[cmd[1]], nil
+	} else {
+		return "", nil
+	}
+}
+
+func (cm *ConsensusModule) applyToState(cmd Command) {
+	opType := getOpType(cmd)
+
+	if opType == READ || cmd[0] == "NOOP" {
+		return
+	}
+
+	switch cmd[0] {
+	case "CREATE":
+		cm.files[cmd[1]] = ""
+	case "UPDATE":
+		cm.files[cmd[1]] = cmd[2]
+	case "DELETE":
+		delete(cm.files, cmd[1])	
+	}
 }
 
 // create and append new entry to the log
@@ -234,8 +268,7 @@ func (cm *ConsensusModule) HandleTerm(reqTerm int, leaderID NodeID) bool {
 	}
 
 	if reqTerm > cm.currentTerm {
-		// TODO: Save leader's id if needed
-		// register term change and fallback to Follower
+		cm.votedFor = leaderID
 		if cm.nodeStatus == LEADER {
 			cm.leader2follower()
 		}
@@ -327,6 +360,8 @@ func (cm *ConsensusModule) startElection() {
 		cm.ctxCancel()
 	}
 
+	// INFO: wait until the previous election is stopped
+
 	cm.multiElectionMutex.Lock()
 	cm.multiElectionMutex.Unlock()
 
@@ -339,7 +374,7 @@ func (cm *ConsensusModule) startElection() {
 	cm.nodeStatus = CANDIDATE
 	cm.currentTerm++
 
-	ch := make(chan ElectionReply)
+	ch := make(chan ElectionReply, cm.clusterSize - 1)
 
 	reqArgs := RequestVoteArgs{
 		candidateID: SRV_ID,
@@ -354,10 +389,9 @@ func (cm *ConsensusModule) startElection() {
 		}
 
 		go func(ch chan ElectionReply) {
-			res := cm.sendRequestVoteRPC(id, reqArgs)
 			select {
-			case ch <- ElectionReply{voteGranted: res.voteGranted, id: id}:
-			default:
+			case <-cm.ctx.Done():
+			case ch <- ElectionReply{voteGranted: cm.sendRequestVoteRPC(id, reqArgs).voteGranted, id: id}:
 			}
 		}(ch)
 	}
@@ -365,9 +399,14 @@ func (cm *ConsensusModule) startElection() {
 	totVotes := 1
 	votesGranted := 1
 
+	// INFO: If the new election process takes the lock before the old one reaches
+	// this point, some problems may arise (?).
+	// However this won't likely happen, as it's "impossible" for the old one to take more
+	// than 150 ms to reach this point
+
 	electionWon := false
+	cm.multiElectionMutex.Lock()
 	for votesGranted < cm.quorum || totVotes-votesGranted >= cm.clusterSize-cm.quorum+1 {
-		cm.multiElectionMutex.Lock()
 		select {
 		case <-cm.ctx.Done():
 			cm.nodeStatus = FOLLOWER
@@ -375,7 +414,6 @@ func (cm *ConsensusModule) startElection() {
 			cm.multiElectionMutex.Unlock()
 			return
 		case response := <-ch:
-			cm.multiElectionMutex.Unlock()
 			totVotes++
 			if response.voteGranted {
 				votesGranted++
@@ -383,8 +421,11 @@ func (cm *ConsensusModule) startElection() {
 
 			electionWon = votesGranted >= cm.quorum
 		}
-
 	}
+
+	cm.ctxCancel()
+
+	cm.multiElectionMutex.Unlock()
 
 	if electionWon {
 		cm.nodeStatus = LEADER

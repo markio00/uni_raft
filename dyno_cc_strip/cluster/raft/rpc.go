@@ -20,6 +20,9 @@ type CMInnerInterface interface {
 	ValidVoteRequest() bool
 	CanVoteFor(checkIdx, checkTerm int) bool
 	VoteFor(candidateID string) bool
+
+	// State APIs
+	SyncToLeaderFileSystem(targetCommitIdx int)
 }
 
 type RpcObject struct {
@@ -77,6 +80,8 @@ func (obj *RpcObject) AppendEntriesRPC(args AppendEntriesArgs, resp *AppendEntri
 	// update local commit index with the leader provided one
 	obj.cm.SyncCommitIdx(args.commitIdx)
 
+	obj.cm.SyncToLeaderFileSystem(args.commitIdx)
+
 	return nil
 }
 
@@ -108,5 +113,14 @@ func (obj *RpcObject) RequestVoteRPC(args RequestVoteArgs, resp *RequestVoteResp
 	}
 
 	resp.voteGranted = obj.cm.VoteFor(args.candidateID)
+
 	return nil
+}
+
+func (cm *ConsensusModule) SyncToLeaderFilesystem(targetCommitIdx int) {
+	i := cm.commitIdx + 1
+	for range targetCommitIdx - cm.commitIdx {
+		cm.applyToState(cm.log[i].cmd)
+		i++
+	}
 }

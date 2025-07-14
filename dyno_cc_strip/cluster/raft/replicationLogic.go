@@ -1,6 +1,7 @@
 package raft
 
 import (
+	"context"
 	"time"
 )
 
@@ -12,6 +13,11 @@ import (
 // - starts the replicator workers
 // - when new logs available to replicate, signals workers to wake
 func (cm *ConsensusModule) replicationManager() {
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cm.ctx = ctx
+	cm.ctxCancel = cancel
+
 	// initialize workers and related infrastructure
 
 	cm.appendNewLogEntry(Command{"NOOP"})

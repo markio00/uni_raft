@@ -1,7 +1,7 @@
 package raft
 
-type path string
-type opType int
+type path = string
+type opType = int
 
 const (
 	READ opType = iota

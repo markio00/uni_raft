@@ -120,7 +120,9 @@ func (cm *ConsensusModule) sendRpcRequest(id NodeID, method string, request any,
 }
 
 func (cm *ConsensusModule) sendAppendEntriesRPC(id NodeID, request AppendEntriesArgs) *AppendEntriesResponse {
-	result := AppendEntriesResponse{}
+	result := AppendEntriesResponse{
+		ccPass: false,
+	}
 
 	cm.sendRpcRequest(id, "AppendEntriesRPC", request, &result)
 
@@ -128,7 +130,9 @@ func (cm *ConsensusModule) sendAppendEntriesRPC(id NodeID, request AppendEntries
 }
 
 func (cm *ConsensusModule) sendRequestVoteRPC(id NodeID, request RequestVoteArgs) *RequestVoteResponse {
-	result := RequestVoteResponse{}
+	result := RequestVoteResponse{
+		voteGranted: false,
+	}
 
 	cm.sendRpcRequest(id, "RequestVoteRPC", request, &result)
 
