@@ -67,6 +67,6 @@ func getOpType(cmd Command) opType {
 
 func doOpTypesConflict(opType1 opType, opType2 opType) bool {
 	return opType1 == READ && opType2 == WRITE ||
-		opType1 == WRITE && opType2 == READ ||
-		opType1 == WRITE && opType2 == WRITE
+				 opType1 == WRITE && opType2 == READ ||
+		     opType1 == WRITE && opType2 == WRITE
 }

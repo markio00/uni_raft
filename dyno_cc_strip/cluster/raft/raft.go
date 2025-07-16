@@ -2,7 +2,6 @@ package raft
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"net/rpc"
 	"sync"
@@ -179,10 +178,10 @@ func (cm *ConsensusModule) ApplyCommand(cmd Command) (string, error) {
 
 	if cmd[0] == "CREATE" && ok {
 		cm.opsInProgress[cmd[1]] = NONE
-		return "", errors.New("File already exists")
+		return "", fmt.Errorf("File %s already exists", cmd[1])
 	} else if !ok {
 		cm.opsInProgress[cmd[1]] = NONE
-		return "", errors.New("File doesn't exist")
+		return "", fmt.Errorf("File %s doesn't exist", cmd[1])
 	}
 
 	// TODO: Send heartbeat for read-only requests (Chapter 8 of Raft)
@@ -374,6 +373,8 @@ func (cm *ConsensusModule) startElection() {
 	cm.nodeStatus = CANDIDATE
 	cm.currentTerm++
 
+	cm.votedFor = SRV_ID
+
 	ch := make(chan ElectionReply, cm.clusterSize - 1)
 
 	reqArgs := RequestVoteArgs{
@@ -399,10 +400,10 @@ func (cm *ConsensusModule) startElection() {
 	totVotes := 1
 	votesGranted := 1
 
-	// INFO: If the new election process takes the lock before the old one reaches
-	// this point, some problems may arise (?).
-	// However this won't likely happen, as it's "impossible" for the old one to take more
-	// than 150 ms to reach this point
+	// BUG: If the new election process P_2 takes the lock before the old one P_1 reaches
+	// this point, some problems may arise as two election processes would run simultaneously.
+	// However this won't likely happen, as it's "impossible" for P_1 to take more
+	// than 150 ms (the least election timeout for P_2 to spawn) to reach this point
 
 	electionWon := false
 	cm.multiElectionMutex.Lock()
