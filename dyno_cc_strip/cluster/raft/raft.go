@@ -3,6 +3,7 @@ package raft
 import (
 	"context"
 	"fmt"
+	"log"
 	"net/rpc"
 	"sync"
 	"time"
@@ -50,6 +51,7 @@ type (
 type ConsensusModule struct {
 	mu                 sync.Mutex // FIX: delete mutex and sub with narrow scoped ones
 	multiElectionMutex sync.Mutex
+	connMutex          sync.RWMutex
 
 	// Filesystem related stuff
 	opsInProgress map[path]opType
@@ -98,6 +100,7 @@ func (cm *ConsensusModule) NewRaftInstance(cfg Configuration) CMOuterInterface {
 	return &ConsensusModule{
 		mu:                 sync.Mutex{},
 		multiElectionMutex: sync.Mutex{},
+		connMutex:          sync.RWMutex{},
 
 		opsInProgress: map[path]opType{},
 		files: map[path]string{},
@@ -166,8 +169,11 @@ func (cm *ConsensusModule) ApplyCommand(cmd Command) (string, error) {
 	path := getPath(cmd)
 	opType := getOpType(cmd)
 
+	cm.mu.Lock()
+
 	if _, ok := cm.opsInProgress[path]; ok {
 		if doOpTypesConflict(opType, cm.opsInProgress[path]) {
+			cm.mu.Unlock()
 			return "", fmt.Errorf("A conflicting operation on %s is already in progress", cmd[1])
 		}
 	}
@@ -175,6 +181,8 @@ func (cm *ConsensusModule) ApplyCommand(cmd Command) (string, error) {
 	cm.opsInProgress[path] = getOpType(cmd)
 
 	_, ok := cm.files[cmd[1]]
+
+	cm.mu.Unlock()
 
 	if cmd[0] == "CREATE" && ok {
 		cm.opsInProgress[cmd[1]] = NONE
@@ -187,7 +195,9 @@ func (cm *ConsensusModule) ApplyCommand(cmd Command) (string, error) {
 	// TODO: Send heartbeat for read-only requests (Chapter 8 of Raft)
 
 	// create and append log entry, return related idx
+	cm.mu.Lock()
 	idx := cm.appendNewLogEntry(cmd)
+	cm.mu.Unlock()
 
 	// create and store a commit signaling channel
 	ch := make(chan error)
@@ -200,13 +210,17 @@ func (cm *ConsensusModule) ApplyCommand(cmd Command) (string, error) {
 	<-ch
 	delete(cm.commitSignalingChans, idx)
 
+	cm.mu.Lock()
+
 	cm.applyToState(cmd)
 
 	cm.opsInProgress[cmd[1]] = NONE // INFO: Concurrent reads are not supported
 
 	if opType == READ {
+		cm.mu.Unlock()
 		return cm.files[cmd[1]], nil
 	} else {
+		cm.mu.Unlock()
 		return "", nil
 	}
 }
@@ -253,13 +267,11 @@ func (cm *ConsensusModule) leader2follower() {
 }
 
 /*
- * Shared APIs
+ * Shared APIs INFO:their caller invokes Lock() before calling them
  */
 
 // Checks handles eventual term increase and returns true if request is valid and shouldn't be discarded
-func (cm *ConsensusModule) HandleTerm(reqTerm int, leaderID NodeID) bool {
-	cm.mu.Lock()
-	defer cm.mu.Unlock()
+func (cm *ConsensusModule) HandleTerm(reqTerm int, leaderID NodeID, isFromRequestForVote bool) bool {
 
 	if reqTerm < cm.currentTerm {
 		// requests generated in older terms get discarded
@@ -267,8 +279,12 @@ func (cm *ConsensusModule) HandleTerm(reqTerm int, leaderID NodeID) bool {
 	}
 
 	if reqTerm > cm.currentTerm {
-		cm.votedFor = leaderID
+		if !isFromRequestForVote {
+			cm.votedFor = leaderID
+			log.Printf("HandleTerm: set votedFor to %s\n", leaderID)
+		}
 		if cm.nodeStatus == LEADER {
+			log.Printf("HandleTerm: falling back to follower from leader\n")
 			cm.leader2follower()
 		}
 		cm.nodeStatus = FOLLOWER
@@ -281,9 +297,8 @@ func (cm *ConsensusModule) HandleTerm(reqTerm int, leaderID NodeID) bool {
 // Resets the election timer, which starts the election process
 func (cm *ConsensusModule) ResetElectionTimer() {
 	d := getRandomDuration(ELEC_TIMER_MIN, ELEC_TIMER_MAX)
-	cm.mu.Lock()
 	cm.electionTimer.Reset(d)
-	cm.mu.Unlock()
+	log.Printf("Reset election timeout to %d ms\n", d)
 }
 
 /*
@@ -292,9 +307,6 @@ func (cm *ConsensusModule) ResetElectionTimer() {
 
 // Perform consistency check to safely append logs and return the boolean result
 func (cm *ConsensusModule) ConsistencyCheck(ccIdx, ccTerm int) bool {
-	cm.mu.Lock()
-	defer cm.mu.Unlock()
-
 	matchingEntryIndex := -1
 	// Search for a matching entry
 	for i := range cm.log {
@@ -341,11 +353,23 @@ func (cm *ConsensusModule) CanVoteFor(checkIdx, checkTerm int) bool {
 
 // Vote for the provided and suitable candidate if didn't vote already and wether that's the case
 func (cm *ConsensusModule) VoteFor(candidateID NodeID) bool {
-	if cm.votedFor != "" {
+	if cm.votedFor == "" {
 		cm.votedFor = candidateID
 		return true
 	}
 	return false
+}
+
+/*
+ * Mutual exclusion related stuff
+ */
+
+func (cm *ConsensusModule) Lock() {
+	cm.mu.Lock()
+}
+
+func (cm *ConsensusModule) Unlock() {
+	cm.mu.Unlock()
 }
 
 /*
@@ -355,18 +379,22 @@ func (cm *ConsensusModule) VoteFor(candidateID NodeID) bool {
 func (cm *ConsensusModule) startElection() {
 
 	// stop previous election if timeout occurred
+	cm.mu.Lock()
 	if cm.nodeStatus == CANDIDATE {
 		cm.ctxCancel()
 	}
+	cm.mu.Lock()
 
 	// INFO: wait until the previous election is stopped
 
 	cm.multiElectionMutex.Lock()
-	cm.multiElectionMutex.Unlock()
+	cm.multiElectionMutex.Unlock() // FIX: Shouldn't be a mutex, but instead a channel
 
 	ctx, cancel := context.WithCancel(context.Background())
 	cm.ctx = ctx
 	cm.ctxCancel = cancel
+
+	cm.mu.Lock()
 
 	cm.ResetElectionTimer()
 
@@ -397,6 +425,8 @@ func (cm *ConsensusModule) startElection() {
 		}(ch)
 	}
 
+	cm.mu.Unlock()
+
 	totVotes := 1
 	votesGranted := 1
 
@@ -410,8 +440,10 @@ func (cm *ConsensusModule) startElection() {
 	for votesGranted < cm.quorum || totVotes-votesGranted >= cm.clusterSize-cm.quorum+1 {
 		select {
 		case <-cm.ctx.Done():
+			cm.mu.Lock()
 			cm.nodeStatus = FOLLOWER
 			cm.ResetElectionTimer()
+			cm.mu.Unlock()
 			cm.multiElectionMutex.Unlock()
 			return
 		case response := <-ch:
@@ -428,6 +460,7 @@ func (cm *ConsensusModule) startElection() {
 
 	cm.multiElectionMutex.Unlock()
 
+	cm.mu.Lock()
 	if electionWon {
 		cm.nodeStatus = LEADER
 		cm.electionTimer.Stop()
@@ -436,4 +469,5 @@ func (cm *ConsensusModule) startElection() {
 		cm.nodeStatus = FOLLOWER
 		cm.ResetElectionTimer()
 	}
+	cm.mu.Unlock()
 }

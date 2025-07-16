@@ -70,3 +70,11 @@ func doOpTypesConflict(opType1 opType, opType2 opType) bool {
 				 opType1 == WRITE && opType2 == READ ||
 		     opType1 == WRITE && opType2 == WRITE
 }
+
+func (cm *ConsensusModule) SyncToLeaderFilesystem(targetCommitIdx int) {
+	i := cm.commitIdx + 1
+	for range targetCommitIdx - cm.commitIdx {
+		cm.applyToState(cm.log[i].cmd)
+		i++
+	}
+}

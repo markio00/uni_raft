@@ -2,6 +2,7 @@ package raft
 
 import (
 	"context"
+	"log"
 	"time"
 )
 
@@ -20,7 +21,10 @@ func (cm *ConsensusModule) replicationManager() {
 
 	// initialize workers and related infrastructure
 
+	cm.mu.Lock()
 	cm.appendNewLogEntry(Command{"NOOP"})
+
+	log.Printf("replicationManager: Appended NOOP log entry\n")
 
 	go cm.betterConsensusTrackerLoop()
 
@@ -40,20 +44,26 @@ func (cm *ConsensusModule) replicationManager() {
 		go cm.replicatorWorker(id, ch)
 	}
 
+	cm.mu.Unlock()
+
 	for {
 		select {
 		// when leader deposed, stop the loop
 		case <-cm.ctx.Done():
+			log.Printf("replicationManager: Exiting due to cancellation signal\n")
+
 			return
 		// When receiving command from client
 		case <-cm.signalNewEntryToReplicate:
+			log.Printf("replicationManager: A new entry has to be replicated!\n")
 		}
 
 		// wakeup replicators
-		for _, ch := range replicatorChannels {
+		for id, ch := range replicatorChannels {
 			select {
 			case ch <- struct{}{}: // signal replicator if idle
 			default: // let it work otherwise
+				log.Printf("replicationManager: Couldn't signal replicator for %s as it wasn't idle\n", id)
 			}
 		}
 	}
@@ -66,7 +76,9 @@ func (cm *ConsensusModule) replicationManager() {
 func (cm *ConsensusModule) replicatorWorker(node NodeID, newLogsAvailable chan struct{}) {
 
 	// Remote node replication index
+	cm.mu.Lock()
 	remoteNodeIdx := cm.currentIdx
+	cm.mu.Unlock()
 
 	heartbeatTimer := time.NewTimer(HEARTBEAT_DELAY)
 
@@ -74,6 +86,7 @@ func (cm *ConsensusModule) replicatorWorker(node NodeID, newLogsAvailable chan s
 		// when leader deposed, stop the loop
 		select {
 		case <-cm.ctx.Done():
+			log.Printf("replicatorWorker#%s: Exiting due to cancellation signal\n", node)
 			return
 		default:
 		}
@@ -82,35 +95,47 @@ func (cm *ConsensusModule) replicatorWorker(node NodeID, newLogsAvailable chan s
 		heartbeatTimer.Reset(HEARTBEAT_DELAY)
 
 		// wait for new entries if no more logs to replicate
+		cm.mu.Lock()
 		if remoteNodeIdx == cm.currentIdx {
+			cm.mu.Unlock()
 
 			// wait for new entries or send heartbeat
 			select {
 			case <-newLogsAvailable:
 			case <-heartbeatTimer.C:
 				// when heartbeat timer ticks, send heartbeat and continue with next iteration
-				cm.sendAppendEntriesRPC(node, AppendEntriesArgs{
+				log.Printf("replicatorWorker#%s: Sending heartbeat\n", node)
+				cm.mu.Lock()
+				args := AppendEntriesArgs{
 					leaderID:  SRV_ID,
 					commitIdx: cm.commitIdx,
 					term:      cm.currentTerm,
 					ccIdx:     -1,
 					ccTerm:    -1,
 					entry:     nil,
-				})
+				}
+				cm.mu.Unlock()
+				cm.sendAppendEntriesRPC(node, args)
 				continue
 			}
+		} else {
+			cm.mu.Unlock()
 		}
 
 		currentReplicatingIdx := remoteNodeIdx + 1
-
-		result := cm.sendAppendEntriesRPC(node, AppendEntriesArgs{
+		
+		cm.mu.Lock()
+		args := AppendEntriesArgs{
 			leaderID:  SRV_ID,
 			commitIdx: cm.commitIdx,
 			term:      cm.currentTerm,
 			ccIdx:     cm.log[remoteNodeIdx].idx,
 			ccTerm:    cm.log[remoteNodeIdx].term,
 			entry:     &cm.log[currentReplicatingIdx],
-		})
+		}
+		cm.mu.Unlock()
+
+		result := cm.sendAppendEntriesRPC(node, args)
 
 		if result.ccPass {
 			// if replication successful, update remote idx tracker and send ack to consensus tracker to calculate majority
@@ -119,8 +144,12 @@ func (cm *ConsensusModule) replicatorWorker(node NodeID, newLogsAvailable chan s
 				id:  node,
 				idx: currentReplicatingIdx,
 			}
+
+			log.Printf("replicatorWorker#%s: entry %d accepted\n", node, currentReplicatingIdx)
 		} else {
 			// if replication unsuccessful (consistency check fail) decrease remote idx tracker
+
+			log.Printf("replicatorWorker#%s: entry %d not accepted\n", node, currentReplicatingIdx)
 			remoteNodeIdx--
 		}
 	}
@@ -134,6 +163,7 @@ func (cm *ConsensusModule) betterConsensusTrackerLoop() {
 		// when leader deposed, stop the loop
 		select {
 		case <-cm.ctx.Done():
+			log.Printf("betterConsensusTrackerLoop: exiting due to cancellation signal\n")
 			return
 		default:
 		}
@@ -143,7 +173,9 @@ func (cm *ConsensusModule) betterConsensusTrackerLoop() {
 		ledger[ack.id] = ack.idx
 
 		// if entry already committed, continue to next iteration
+		cm.mu.Lock()
 		if ack.idx <= cm.commitIdx {
+			cm.mu.Unlock()
 			continue
 		}
 
@@ -156,8 +188,12 @@ func (cm *ConsensusModule) betterConsensusTrackerLoop() {
 		}
 
 		if countReplicas >= cm.quorum {
+			cm.mu.Lock()
 			cm.commitIdx = ack.idx
+			cm.mu.Unlock()
 			cm.commitSignalingChans[ack.idx] <- nil
+
+			log.Printf("betterConsensusTrackerLoop: entry %d now committed\n", ack.idx)
 		}
 	}
 }

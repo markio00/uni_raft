@@ -2,7 +2,7 @@ package raft
 
 import (
 	"context"
-	"log/slog"
+	"log"
 	"net"
 	"net/rpc"
 	"time"
@@ -44,26 +44,29 @@ func (cm *ConsensusModule) tryConnection(ip NodeID) {
 
 		// Send a warning if connection takes long
 		warnTimer := time.AfterFunc(RPC_CONN_WARN_TIMEOUT, func() {
-			slog.Warn("Server %v unresponsive after %v", string(ip), RPC_CONN_WARN_TIMEOUT)
+			log.Printf("Server %s unresponsive after %d ms\n", string(ip), RPC_CONN_WARN_TIMEOUT)
 		})
 
 		// Try connection
 		conn, err := dialer.DialContext(ctx, "tcp", string(ip)+RPC_PORT)
 		if err == nil {
 			// if conn successful delete context and add client to the configuration
-			slog.Info("Connection to server %v successful", string(ip))
+			log.Printf("Connection to server %s successful\n", string(ip))
 			warnTimer.Stop()
-			cm.mu.Lock()
+			cm.connMutex.Lock()
 			cm.clusterConfiguration[ip].client = rpc.NewClient(conn)
-			cm.mu.Unlock()
+			cm.connMutex.Unlock()
 
-			// signal conenction now available
+			// signal connection now available
+			cm.connMutex.RLock()
 			cm.clusterConfiguration[ip].canConnect <- struct{}{}
+			cm.connMutex.RLock()
+
 			return
 		}
 
 		// if timeout or conn err occurrs, log it and cancel the context
-		slog.Warn("Couldn't connect to %v: %v", string(ip), err)
+		log.Printf("Couldn't connect to %s: %s\n", string(ip), err)
 		cancel()
 
 		// wait for retry timer
@@ -75,35 +78,37 @@ func (cm *ConsensusModule) tryConnection(ip NodeID) {
 
 // delete connection and
 func (cm *ConsensusModule) dropConnection(id NodeID) {
-	cm.mu.Lock()
+	cm.connMutex.Lock()
 	cm.clusterConfiguration[id].client.Close()
 	delete(cm.clusterConfiguration, id)
-	cm.mu.Unlock()
+	cm.connMutex.Unlock()
 }
 
 func (cm *ConsensusModule) sendRpcRequest(id NodeID, method string, request any, reply any) {
 
-	cm.clusterConfiguration[id].mu.Lock()
-	defer cm.clusterConfiguration[id].mu.Unlock()
-
 	for {
+		cm.connMutex.RLock()
+		canConnect := cm.clusterConfiguration[id].canConnect
 		// if try conn in progress wait
 		if cm.clusterConfiguration[id].client == nil {
+			cm.connMutex.RUnlock()
 			select {
 			// if cancelation signal, early return
 			case <-cm.ctx.Done():
 				return
 			// when try conn terminates proceed with call request
-			case <-cm.clusterConfiguration[id].canConnect:
+			case <-canConnect:
 			}
 		}
 
 		// try request
+		cm.connMutex.RLock()
 		done := make(chan *rpc.Call)
 		cm.clusterConfiguration[id].client.Go("RpcObject."+method, request, reply, done)
+		cm.connMutex.RUnlock()
 
 		select {
-		// if call succeed, return with correct result
+		// if call succeeds, return with correct result
 		case call := <-done:
 			if call.Error == nil {
 				return

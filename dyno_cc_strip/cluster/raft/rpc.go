@@ -8,7 +8,7 @@ import (
 
 type CMInnerInterface interface {
 	// Shared APIs
-	HandleTerm(reqTerm int, leaderID string) bool
+	HandleTerm(reqTerm int, leaderID string, isFromRequestForVote bool) bool
 	ResetElectionTimer()
 
 	// AppendEntries APIs
@@ -17,12 +17,15 @@ type CMInnerInterface interface {
 	SyncCommitIdx(leaderCommitIdx int)
 
 	// RequestVote APIs
-	ValidVoteRequest() bool
 	CanVoteFor(checkIdx, checkTerm int) bool
 	VoteFor(candidateID string) bool
 
 	// State APIs
 	SyncToLeaderFileSystem(targetCommitIdx int)
+
+	// Mutual exclusion related stuff
+	Lock()
+	Unlock()
 }
 
 type RpcObject struct {
@@ -59,13 +62,21 @@ type AppendEntriesResponse struct {
 }
 
 func (obj *RpcObject) AppendEntriesRPC(args AppendEntriesArgs, resp *AppendEntriesResponse) error {
+
+	log.Printf("Received AppendEntriesRPC from %s\n", args.leaderID)
+
+	obj.cm.Lock()
+	defer obj.cm.Unlock()
+
 	obj.cm.ResetElectionTimer()
 
-	if !obj.cm.HandleTerm(args.term, args.leaderID) {
+	if !obj.cm.HandleTerm(args.term, args.leaderID, false) {
+		log.Printf("Refused AppendEntriesRPC from %s due to term %d\n", args.leaderID, args.term)
 		return nil
 	}
 
 	if !obj.cm.ConsistencyCheck(args.ccIdx, args.ccTerm) {
+		log.Printf("Refused AppendEntriesRPC from %s due to consistency check failure\n", args.leaderID)
 		resp.ccPass = false
 		return nil
 	}
@@ -80,7 +91,10 @@ func (obj *RpcObject) AppendEntriesRPC(args AppendEntriesArgs, resp *AppendEntri
 	// update local commit index with the leader provided one
 	obj.cm.SyncCommitIdx(args.commitIdx)
 
-	obj.cm.SyncToLeaderFileSystem(args.commitIdx)
+	obj.cm.SyncToLeaderFileSystem(args.commitIdx) // PERF: this should be async., carried on by worker threads
+																								// FIX:  this should be async., carried on by worker threads
+
+	log.Printf("AppendEntriesRPC from %s accepted (commit synced)\n", args.leaderID)
 
 	return nil
 }
@@ -96,31 +110,30 @@ type RequestVoteResponse struct {
 }
 
 func (obj *RpcObject) RequestVoteRPC(args RequestVoteArgs, resp *RequestVoteResponse) error {
+
+	log.Printf("Received RequestVoteRPC from %s\n", args.candidateID)
+
+	obj.cm.Lock()
+	defer obj.cm.Unlock()
+
 	obj.cm.ResetElectionTimer()
 
-	if !obj.cm.HandleTerm(args.term, "") {
-		return nil
-	}
-
-	// minimum election timer not elapsed
-	if !obj.cm.ValidVoteRequest() {
+	// INFO: Resetting leader id at election start (only at first vote)
+	if !obj.cm.HandleTerm(args.term, "", true) {
+		log.Printf("Refused RequestVoteRPC from %s due to term %d\n", args.candidateID, args.term)
 		return nil
 	}
 
 	if !obj.cm.CanVoteFor(args.checkIdx, args.checkTerm) {
+		log.Printf("Refused RequestVoteRPC from %s due to log discrepancy\n", args.candidateID)
 		resp.voteGranted = false
 		return nil
 	}
 
 	resp.voteGranted = obj.cm.VoteFor(args.candidateID)
 
+	log.Printf("Accepted RequestVoteRPC from %s (vote granted)\n", args.candidateID)
+
 	return nil
 }
 
-func (cm *ConsensusModule) SyncToLeaderFilesystem(targetCommitIdx int) {
-	i := cm.commitIdx + 1
-	for range targetCommitIdx - cm.commitIdx {
-		cm.applyToState(cm.log[i].cmd)
-		i++
-	}
-}
