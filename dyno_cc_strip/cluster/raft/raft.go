@@ -18,15 +18,17 @@ const (
 )
 
 const (
-	ELEC_TIMER_MIN  = 500 * time.Millisecond
-	ELEC_TIMER_MAX  = 800 * time.Millisecond
-	HEARTBEAT_DELAY = 100 * time.Millisecond
+	ELEC_TIMER_MIN  = 5 * time.Second
+	ELEC_TIMER_MAX  = 60 * time.Second
+	HEARTBEAT_DELAY = 1 * time.Second
 )
 
-type logEntry struct {
-	idx  int
-	term int
-	cmd  Command
+var SRV_ID string
+
+type LogEntry struct {
+	Idx  int
+	Term int
+	Cmd  Command
 }
 
 type (
@@ -55,14 +57,14 @@ type ConsensusModule struct {
 
 	// Filesystem related stuff
 	opsInProgress map[path]opType
-	files map[path]string
+	files         map[path]string
 
 	// Raft state fields
 	nodeStatus  nodeStatus
 	currentTerm int
 	currentIdx  int
 	commitIdx   int
-	log         []logEntry
+	log         []LogEntry
 
 	// Cluster config related fields
 	clusterConfiguration map[NodeID]*Conn
@@ -70,7 +72,7 @@ type ConsensusModule struct {
 	clusterSize          int
 
 	// Election related fields
-	electionTimer time.Timer
+	electionTimer *time.Timer
 	votedFor      NodeID
 
 	// Communication with action handler goroutine
@@ -91,31 +93,34 @@ type ConsensusModule struct {
 
 // Public interface for users of the Raft Module
 type CMOuterInterface interface {
-	NewRaftInstance(cfg Configuration) CMOuterInterface
 	Start()
 	ApplyCommand(cmd Command) (string, error)
 }
 
-func (cm *ConsensusModule) NewRaftInstance(cfg Configuration) CMOuterInterface {
+func NewRaftInstance(cfg Configuration, srvId string) CMOuterInterface {
+	SRV_ID = srvId
 	return &ConsensusModule{
 		mu:                 sync.Mutex{},
 		multiElectionMutex: sync.Mutex{},
 		connMutex:          sync.RWMutex{},
 
 		opsInProgress: map[path]opType{},
-		files: map[path]string{},
+		files:         map[path]string{},
 
 		nodeStatus:  FOLLOWER,
 		currentTerm: 0,
 		currentIdx:  0,
 		commitIdx:   0,
-		log:         make([]logEntry, 0),
+		log:         make([]LogEntry, 0),
 
 		quorum:      len(cfg)/2 + 1,
 		clusterSize: len(cfg),
 		clusterConfiguration: func(cfg Configuration) map[NodeID]*Conn {
 			m := map[NodeID]*Conn{}
 			for _, k := range cfg {
+				if k == SRV_ID {
+					continue
+				}
 				m[k] = &Conn{
 					client:     nil,
 					mu:         &sync.Mutex{},
@@ -125,7 +130,7 @@ func (cm *ConsensusModule) NewRaftInstance(cfg Configuration) CMOuterInterface {
 			return m
 		}(cfg),
 
-		electionTimer: time.Timer{},
+		electionTimer: &time.Timer{},
 		votedFor:      "",
 
 		signalNewEntryToReplicate: make(chan struct{}),
@@ -141,17 +146,28 @@ func (cm *ConsensusModule) NewRaftInstance(cfg Configuration) CMOuterInterface {
 // Starts all the control threads, timed events and connections
 func (cm *ConsensusModule) Start() {
 	// Start connection manager and RPC server
+	cm.appendNewLogEntry(Command{"NOOP"})
+
 	go cm.startRpcServer()
 
-	for node := range cm.clusterConfiguration {
-		go cm.tryConnection(node)
-	}
-
 	// Start election timer
-	cm.electionTimer = *time.AfterFunc(
+	cm.electionTimer = time.AfterFunc(
 		getRandomDuration(ELEC_TIMER_MIN, ELEC_TIMER_MAX),
 		cm.startElection,
 	)
+
+	// FIX: should be signal from rpc server
+	log.Println("startup: Waiting 3 sec for RPC server to spool up")
+	time.Sleep(3 * time.Second)
+
+	for node := range cm.clusterConfiguration {
+		if node == SRV_ID {
+			continue
+		}
+
+		go cm.tryConnection(node)
+	}
+
 }
 
 // Applies the given command to the distributed cluster
@@ -194,7 +210,7 @@ func (cm *ConsensusModule) ApplyCommand(cmd Command) (string, error) {
 
 	// TODO: Send heartbeat for read-only requests (Chapter 8 of Raft)
 
-	// create and append log entry, return related idx
+	// create and append lreset called on uninitialized timerin golog entry, return related idx
 	cm.mu.Lock()
 	idx := cm.appendNewLogEntry(cmd)
 	cm.mu.Unlock()
@@ -238,7 +254,7 @@ func (cm *ConsensusModule) applyToState(cmd Command) {
 	case "UPDATE":
 		cm.files[cmd[1]] = cmd[2]
 	case "DELETE":
-		delete(cm.files, cmd[1])	
+		delete(cm.files, cmd[1])
 	}
 }
 
@@ -247,10 +263,10 @@ func (cm *ConsensusModule) applyToState(cmd Command) {
 func (cm *ConsensusModule) appendNewLogEntry(cmd Command) int {
 	cm.currentIdx++
 
-	entry := logEntry{
-		idx:  cm.currentIdx,
-		term: cm.currentTerm,
-		cmd:  cmd,
+	entry := LogEntry{
+		Idx:  cm.currentIdx,
+		Term: cm.currentTerm,
+		Cmd:  cmd,
 	}
 
 	cm.appendToLog(entry)
@@ -271,7 +287,7 @@ func (cm *ConsensusModule) leader2follower() {
  */
 
 // Checks handles eventual term increase and returns true if request is valid and shouldn't be discarded
-func (cm *ConsensusModule) HandleTerm(reqTerm int, leaderID NodeID, isFromRequestForVote bool) bool {
+func (cm *ConsensusModule) HandleTerm(reqTerm int, leaderID NodeID) bool {
 
 	if reqTerm < cm.currentTerm {
 		// requests generated in older terms get discarded
@@ -279,10 +295,9 @@ func (cm *ConsensusModule) HandleTerm(reqTerm int, leaderID NodeID, isFromReques
 	}
 
 	if reqTerm > cm.currentTerm {
-		if !isFromRequestForVote {
-			cm.votedFor = leaderID
-			log.Printf("HandleTerm: set votedFor to %s\n", leaderID)
-		}
+		cm.votedFor = leaderID
+		log.Printf("HandleTerm: set votedFor to '%s'\n", leaderID)
+
 		if cm.nodeStatus == LEADER {
 			log.Printf("HandleTerm: falling back to follower from leader\n")
 			cm.leader2follower()
@@ -298,7 +313,7 @@ func (cm *ConsensusModule) HandleTerm(reqTerm int, leaderID NodeID, isFromReques
 func (cm *ConsensusModule) ResetElectionTimer() {
 	d := getRandomDuration(ELEC_TIMER_MIN, ELEC_TIMER_MAX)
 	cm.electionTimer.Reset(d)
-	log.Printf("Reset election timeout to %d ms\n", d)
+	log.Printf("Reset election timeout to %d ns\n", d)
 }
 
 /*
@@ -307,29 +322,27 @@ func (cm *ConsensusModule) ResetElectionTimer() {
 
 // Perform consistency check to safely append logs and return the boolean result
 func (cm *ConsensusModule) ConsistencyCheck(ccIdx, ccTerm int) bool {
-	matchingEntryIndex := -1
 	// Search for a matching entry
-	for i := range cm.log {
-		currEntry := cm.log[len(cm.log)-i-1]
-		if currEntry.idx == ccIdx && currEntry.term == ccTerm {
-			matchingEntryIndex = i
-			break
-		}
+	if len(cm.log)-1 < ccIdx {
+		return false
 	}
 
-	if matchingEntryIndex != -1 {
-		cm.log = cm.log[0:matchingEntryIndex]
+	currEntry := cm.log[ccIdx]
+	if currEntry.Term != ccTerm {
+		return false
 	}
 
-	return matchingEntryIndex != -1
+	cm.log = cm.log[0:ccIdx]
+
+	return true
 }
 
-func (cm *ConsensusModule) appendToLog(entry logEntry) {
+func (cm *ConsensusModule) appendToLog(entry LogEntry) {
 	cm.log = append(cm.log, entry)
 }
 
 // Append already consistent entry to the local log and apply configuration change if one is detected
-func (cm *ConsensusModule) AppendEntry(entry logEntry) {
+func (cm *ConsensusModule) AppendEntry(entry LogEntry) {
 	cm.appendToLog(entry)
 }
 
@@ -342,13 +355,20 @@ func (cm *ConsensusModule) SyncCommitIdx(leaderCommitIdx int) {
  */
 
 // Check if the candidate has appropriate term and committed index to be eligible for vote
-func (cm *ConsensusModule) CanVoteFor(checkIdx, checkTerm int) bool {
+func (cm *ConsensusModule) CanVoteFor(checkIdx, checkTerm int, id NodeID) bool {
 	// INFO: Election restriction for Leader Completeness Property' (raft paper $ 5.4.1)
 	// FIX: check if leader completeness check is up to spec
+
 	last_entry := cm.log[len(cm.log)-1]
-	hasHigherTerm := checkTerm > last_entry.term
-	hasHigherIdx := checkTerm == last_entry.term && checkIdx > last_entry.idx
-	return hasHigherTerm || hasHigherIdx
+	hasHigherTerm := checkTerm > last_entry.Term
+	hasHigherIdx := checkTerm == last_entry.Term && checkIdx >= last_entry.Idx
+	canVote := hasHigherTerm || hasHigherIdx
+
+	if !canVote {
+		log.Printf("election: can't vote '%s'cand['%d'@'%d'] self['%d'@'%d'] ", id, checkIdx, checkTerm, last_entry.Idx, last_entry.Term)
+	}
+
+	return canVote
 }
 
 // Vote for the provided and suitable candidate if didn't vote already and wether that's the case
@@ -378,12 +398,13 @@ func (cm *ConsensusModule) Unlock() {
 
 func (cm *ConsensusModule) startElection() {
 
+	log.Printf("========= START ELECTION %d", cm.currentTerm)
 	// stop previous election if timeout occurred
 	cm.mu.Lock()
 	if cm.nodeStatus == CANDIDATE {
 		cm.ctxCancel()
 	}
-	cm.mu.Lock()
+	cm.mu.Unlock()
 
 	// INFO: wait until the previous election is stopped
 
@@ -403,13 +424,13 @@ func (cm *ConsensusModule) startElection() {
 
 	cm.votedFor = SRV_ID
 
-	ch := make(chan ElectionReply, cm.clusterSize - 1)
+	ch := make(chan ElectionReply, cm.clusterSize-1)
 
 	reqArgs := RequestVoteArgs{
-		candidateID: SRV_ID,
-		term:        cm.currentTerm,
-		checkIdx:    cm.log[len(cm.log)-1].idx,
-		checkTerm:   cm.log[len(cm.log)-1].term,
+		CandidateID: SRV_ID,
+		Term:        cm.currentTerm,
+		CheckIdx:    cm.log[len(cm.log)-1].Idx,
+		CheckTerm:   cm.log[len(cm.log)-1].Term,
 	}
 
 	for id := range cm.clusterConfiguration {
@@ -420,10 +441,12 @@ func (cm *ConsensusModule) startElection() {
 		go func(ch chan ElectionReply) {
 			select {
 			case <-cm.ctx.Done():
-			case ch <- ElectionReply{voteGranted: cm.sendRequestVoteRPC(id, reqArgs).voteGranted, id: id}:
+			case ch <- ElectionReply{voteGranted: cm.sendRequestVoteRPC(id, reqArgs).VoteGranted, id: id}:
 			}
 		}(ch)
 	}
+
+	log.Println("election: sending RequestVoteRPCs ...")
 
 	cm.mu.Unlock()
 
@@ -437,10 +460,12 @@ func (cm *ConsensusModule) startElection() {
 
 	electionWon := false
 	cm.multiElectionMutex.Lock()
-	for votesGranted < cm.quorum || totVotes-votesGranted >= cm.clusterSize-cm.quorum+1 {
+	for (votesGranted < cm.quorum) != (totVotes-votesGranted >= cm.clusterSize-cm.quorum+1) {
 		select {
 		case <-cm.ctx.Done():
 			cm.mu.Lock()
+			log.Println("election: lost due to cancelation signal")
+			log.Println("###################### FOLLOWER #######################")
 			cm.nodeStatus = FOLLOWER
 			cm.ResetElectionTimer()
 			cm.mu.Unlock()
@@ -449,7 +474,10 @@ func (cm *ConsensusModule) startElection() {
 		case response := <-ch:
 			totVotes++
 			if response.voteGranted {
+				log.Printf("election: recv vote from '%s' - GRANTED\n", response.id)
 				votesGranted++
+			} else {
+				log.Printf("election: recv vote from '%s' - DENIED\n", response.id)
 			}
 
 			electionWon = votesGranted >= cm.quorum
@@ -459,13 +487,17 @@ func (cm *ConsensusModule) startElection() {
 	cm.ctxCancel()
 
 	cm.multiElectionMutex.Unlock()
-
 	cm.mu.Lock()
+
 	if electionWon {
+		log.Println("election: won")
+		log.Println("####################### LEADER ########################")
 		cm.nodeStatus = LEADER
 		cm.electionTimer.Stop()
 		go cm.replicationManager()
 	} else {
+		log.Println("election: lost")
+		log.Println("###################### FOLLOWER #######################")
 		cm.nodeStatus = FOLLOWER
 		cm.ResetElectionTimer()
 	}

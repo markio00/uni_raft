@@ -22,5 +22,5 @@ func getRandomDuration(dMin, dMax time.Duration) time.Duration {
 	rnd := rand.New(rand.NewSource(time.Now().UnixNano()))
 	n := rnd.Int63n(tMax-tMin+1) + tMin
 
-	return time.Duration(n).Abs() * time.Microsecond
+	return time.Duration(n).Abs() * time.Millisecond
 }

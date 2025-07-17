@@ -107,12 +107,12 @@ func (cm *ConsensusModule) replicatorWorker(node NodeID, newLogsAvailable chan s
 				log.Printf("replicatorWorker#%s: Sending heartbeat\n", node)
 				cm.mu.Lock()
 				args := AppendEntriesArgs{
-					leaderID:  SRV_ID,
-					commitIdx: cm.commitIdx,
-					term:      cm.currentTerm,
-					ccIdx:     -1,
-					ccTerm:    -1,
-					entry:     nil,
+					LeaderID:  SRV_ID,
+					CommitIdx: cm.commitIdx,
+					Term:      cm.currentTerm,
+					CcIdx:     -1,
+					CcTerm:    -1,
+					Entry:     nil,
 				}
 				cm.mu.Unlock()
 				cm.sendAppendEntriesRPC(node, args)
@@ -123,21 +123,21 @@ func (cm *ConsensusModule) replicatorWorker(node NodeID, newLogsAvailable chan s
 		}
 
 		currentReplicatingIdx := remoteNodeIdx + 1
-		
+
 		cm.mu.Lock()
 		args := AppendEntriesArgs{
-			leaderID:  SRV_ID,
-			commitIdx: cm.commitIdx,
-			term:      cm.currentTerm,
-			ccIdx:     cm.log[remoteNodeIdx].idx,
-			ccTerm:    cm.log[remoteNodeIdx].term,
-			entry:     &cm.log[currentReplicatingIdx],
+			LeaderID:  SRV_ID,
+			CommitIdx: cm.commitIdx,
+			Term:      cm.currentTerm,
+			CcIdx:     cm.log[remoteNodeIdx].Idx,
+			CcTerm:    cm.log[remoteNodeIdx].Term,
+			Entry:     &cm.log[currentReplicatingIdx],
 		}
 		cm.mu.Unlock()
 
 		result := cm.sendAppendEntriesRPC(node, args)
 
-		if result.ccPass {
+		if result.CcPass {
 			// if replication successful, update remote idx tracker and send ack to consensus tracker to calculate majority
 			remoteNodeIdx = currentReplicatingIdx
 			cm.replicationAckChan <- ReplicationAck{
