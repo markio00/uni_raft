@@ -19,7 +19,7 @@ const (
 
 const (
 	ELEC_TIMER_MIN  = 5 * time.Second
-	ELEC_TIMER_MAX  = 60 * time.Second
+	ELEC_TIMER_MAX  = 15 * time.Second
 	HEARTBEAT_DELAY = 1 * time.Second
 )
 
@@ -151,10 +151,12 @@ func (cm *ConsensusModule) Start() {
 	go cm.startRpcServer()
 
 	// Start election timer
+	d := getRandomDuration(ELEC_TIMER_MIN, ELEC_TIMER_MAX)
 	cm.electionTimer = time.AfterFunc(
-		getRandomDuration(ELEC_TIMER_MIN, ELEC_TIMER_MAX),
+		d,
 		cm.startElection,
 	)
+	log.Printf("Reset election timeout to %d ns\n", d)
 
 	// FIX: should be signal from rpc server
 	log.Println("startup: Waiting 3 sec for RPC server to spool up")

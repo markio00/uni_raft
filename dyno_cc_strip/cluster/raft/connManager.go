@@ -100,9 +100,11 @@ func (cm *ConsensusModule) sendRpcRequest(id NodeID, method string, request any,
 			// when try conn terminates proceed with call request
 			case <-canConnect:
 			}
+		} else {
+			cm.connMutex.RUnlock()
 		}
 
-		log.Printf("attempting RPC: '%s' to '%s' - no try conn in progres\n", method, id)
+		log.Printf("attempting RPC: '%s' to '%s' - no try conn in progress\n", method, id)
 
 		// try request
 		cm.connMutex.RLock()
