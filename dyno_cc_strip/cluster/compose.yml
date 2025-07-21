@@ -4,6 +4,7 @@ services:
   node6:
     image: raft/no_dyno_cc:latest
     environment:
+      ROLE: "SRV"
       NODES: ${RAFT_REPLICAS} 
       ID: "171.10.0.6"
     networks:
@@ -17,6 +18,7 @@ services:
   node4:
     image: raft/no_dyno_cc:latest
     environment:
+      ROLE: "SRV"
       NODES: ${RAFT_REPLICAS} 
       ID: "171.10.0.4"
     networks:
@@ -28,6 +30,7 @@ services:
   node5:
     image: raft/no_dyno_cc:latest
     environment:
+      ROLE: "SRV"
       NODES: ${RAFT_REPLICAS} 
       ID: "171.10.0.5"
     networks:
@@ -35,6 +38,19 @@ services:
         ipv4_address: 171.10.0.5
     volumes:
       - ./bin/bin_op:/app/binary
+
+  cilent:
+    image: raft/no_dyno_cc:latest
+    environment:
+      ROLE: "CLIENT"
+      NODES: ${RAFT_REPLICAS} 
+      ID: "171.10.0.9"
+    networks:
+      raft_no_dyno_cc:
+        ipv4_address: 171.10.0.9
+    volumes:
+      - ./bin/bin_op:/app/binary
+
 
 networks:
   raft_no_dyno_cc:

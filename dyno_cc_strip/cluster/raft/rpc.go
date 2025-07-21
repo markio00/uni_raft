@@ -33,7 +33,7 @@ type RpcObject struct {
 }
 
 // Starts the rpc server for the current node
-func (cm *ConsensusModule) startRpcServer() {
+func (cm *ConsensusModule) startRpcServer(done chan struct{}) {
 
 	log.Println("startup: starting RPC server")
 	rpcObj := new(RpcObject)
@@ -44,6 +44,8 @@ func (cm *ConsensusModule) startRpcServer() {
 		log.Fatal("startup: RPC listen error:", err)
 
 	}
+
+	done <- struct{}{}
 
 	for {
 		conn, err := l.Accept()

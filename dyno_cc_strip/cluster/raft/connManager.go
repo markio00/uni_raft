@@ -55,7 +55,17 @@ func (cm *ConsensusModule) tryConnection(ip NodeID) {
 			log.Printf("try conn: '%s' successful\n", ip)
 			warnTimer.Stop()
 			cm.connMutex.Lock()
-			cm.clusterConfiguration[ip].client = rpc.NewClient(conn)
+
+			c := cm.clusterConfiguration[ip]
+			cl := rpc.NewClient(conn)
+			if cl == nil {
+				panic("OOPS")
+			}
+			c.client = cl
+			cm.clusterConfiguration[ip] = c
+
+			// FIX: fix da shit
+
 			cm.connMutex.Unlock()
 
 			// signal connection now available
@@ -79,6 +89,7 @@ func (cm *ConsensusModule) tryConnection(ip NodeID) {
 func (cm *ConsensusModule) dropConnection(id NodeID) {
 	cm.connMutex.Lock()
 	cm.clusterConfiguration[id].client.Close()
+	cm.clusterConfiguration[id].client = nil
 	cm.connMutex.Unlock()
 }
 
@@ -87,7 +98,6 @@ func (cm *ConsensusModule) sendRpcRequest(id NodeID, method string, request any,
 	log.Printf("attempting RPC: '%s' to '%s'\n", method, id)
 	for {
 		cm.connMutex.RLock()
-		canConnect := cm.clusterConfiguration[id].canConnect
 		// if try conn in progress wait
 		if cm.clusterConfiguration[id].client == nil {
 
@@ -98,7 +108,8 @@ func (cm *ConsensusModule) sendRpcRequest(id NodeID, method string, request any,
 				log.Printf("attempting RPC: '%s' to '%s' - closed by cancelation signal\n", method, id)
 				return
 			// when try conn terminates proceed with call request
-			case <-canConnect:
+			case <-cm.clusterConfiguration[id].canConnect:
+				log.Printf("NOW CAN CONNECT to '%s'\n", id)
 			}
 		} else {
 			cm.connMutex.RUnlock()
@@ -123,7 +134,7 @@ func (cm *ConsensusModule) sendRpcRequest(id NodeID, method string, request any,
 			} else {
 				err = call.Error
 			}
-		// if cancelation signal, early return
+		// if cacelation signal, early return
 		case <-cm.ctx.Done():
 			log.Printf("attempting RPC: '%s' to '%s' - closed by cancelation signal\n", method, id)
 			return

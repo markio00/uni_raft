@@ -46,7 +46,6 @@ type (
 	Conn = struct {
 		client     *rpc.Client
 		canConnect chan struct{}
-		mu         *sync.Mutex
 	}
 )
 
@@ -95,6 +94,7 @@ type ConsensusModule struct {
 type CMOuterInterface interface {
 	Start()
 	ApplyCommand(cmd Command) (string, error)
+	IsLeader() bool
 }
 
 func NewRaftInstance(cfg Configuration, srvId string) CMOuterInterface {
@@ -123,7 +123,6 @@ func NewRaftInstance(cfg Configuration, srvId string) CMOuterInterface {
 				}
 				m[k] = &Conn{
 					client:     nil,
-					mu:         &sync.Mutex{},
 					canConnect: make(chan struct{}),
 				}
 			}
@@ -143,12 +142,31 @@ func NewRaftInstance(cfg Configuration, srvId string) CMOuterInterface {
 	}
 }
 
+func (cm *ConsensusModule) IsLeader() bool {
+	cm.mu.Lock()
+	defer cm.mu.Unlock()
+
+	return cm.nodeStatus == LEADER
+}
+
 // Starts all the control threads, timed events and connections
 func (cm *ConsensusModule) Start() {
 	// Start connection manager and RPC server
 	cm.appendNewLogEntry(Command{"NOOP"})
 
-	go cm.startRpcServer()
+	done := make(chan struct{})
+	go cm.startRpcServer(done)
+	<-done
+
+	// PERF: clients should not be conencted mandatorily to start operations
+	for node, conn := range cm.clusterConfiguration {
+		if node == SRV_ID {
+			continue
+		}
+
+		go cm.tryConnection(node)
+		<-conn.canConnect
+	}
 
 	// Start election timer
 	d := getRandomDuration(ELEC_TIMER_MIN, ELEC_TIMER_MAX)
@@ -157,19 +175,6 @@ func (cm *ConsensusModule) Start() {
 		cm.startElection,
 	)
 	log.Printf("Reset election timeout to %d ns\n", d)
-
-	// FIX: should be signal from rpc server
-	log.Println("startup: Waiting 3 sec for RPC server to spool up")
-	time.Sleep(3 * time.Second)
-
-	for node := range cm.clusterConfiguration {
-		if node == SRV_ID {
-			continue
-		}
-
-		go cm.tryConnection(node)
-	}
-
 }
 
 // Applies the given command to the distributed cluster
