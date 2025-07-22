@@ -35,14 +35,13 @@ type RpcObject struct {
 // Starts the rpc server for the current node
 func (cm *ConsensusModule) startRpcServer(done chan struct{}) {
 
-	log.Println("startup: starting RPC server")
+	log.Println("startRpcServer: invoked")
 	rpcObj := new(RpcObject)
 	rpcObj.cm = cm
 	rpc.Register(rpcObj)
 	l, err := net.Listen("tcp", RPC_PORT)
 	if err != nil {
-		log.Fatal("startup: RPC listen error:", err)
-
+		log.Fatal("startRpcServer: RPC listen error: '", err, "'")
 	}
 
 	done <- struct{}{}
@@ -50,9 +49,9 @@ func (cm *ConsensusModule) startRpcServer(done chan struct{}) {
 	for {
 		conn, err := l.Accept()
 		if err != nil {
-			log.Fatal("RPC srv: accept error:", err)
+			log.Fatal("RPC server: accept error: '", err, "'")
 		}
-		log.Println("RPC srv: received request")
+		log.Println("RPC server: received request")
 
 		go rpc.ServeConn(conn)
 	}
@@ -73,7 +72,7 @@ type AppendEntriesResponse struct {
 
 func (obj *RpcObject) AppendEntriesRPC(args AppendEntriesArgs, resp *AppendEntriesResponse) error {
 
-	log.Printf("Received AppendEntriesRPC from %s\n", args.LeaderID)
+	log.Printf("AppendEntriesRPC from %s\n", args.LeaderID)
 
 	obj.cm.Lock()
 	defer obj.cm.Unlock()
@@ -81,13 +80,13 @@ func (obj *RpcObject) AppendEntriesRPC(args AppendEntriesArgs, resp *AppendEntri
 	obj.cm.ResetElectionTimer()
 
 	if !obj.cm.HandleTerm(args.Term, args.LeaderID) {
-		log.Printf("Refused AppendEntriesRPC from %s due to term %d\n", args.LeaderID, args.Term)
+		log.Printf("AppendEntriesRPC from %s: refused after HandleTerm\n", args.LeaderID)
 		return nil
 	}
 
-	// if heartbeat, lazy && operator aviods usless and fatal check
+	// if heartbeat, lazy && operator avoids usless and fatal check
 	if args.Entry != nil && !obj.cm.ConsistencyCheck(args.CcIdx, args.CcTerm) {
-		log.Printf("Refused AppendEntriesRPC from %s due to consistency check failure\n", args.LeaderID)
+		log.Printf("AppendEntriesRPC from %s: refused after ConsistencyCheck\n", args.LeaderID)
 		resp.CcPass = false
 		return nil
 	}
@@ -103,9 +102,9 @@ func (obj *RpcObject) AppendEntriesRPC(args AppendEntriesArgs, resp *AppendEntri
 	obj.cm.SyncCommitIdx(args.CommitIdx)
 
 	obj.cm.SyncToLeaderFileSystem(args.CommitIdx) // PERF: this should be async., carried on by worker threads
-	// FIX:  this should be async., carried on by worker threads
+	                                              // FIX:  this should be async., carried on by worker threads
 
-	log.Printf("AppendEntriesRPC from %s accepted (commit synced)\n", args.LeaderID)
+	log.Printf("AppendEntriesRPC from %s: accepted\n", args.LeaderID)
 
 	return nil
 }
@@ -122,7 +121,7 @@ type RequestVoteResponse struct {
 
 func (obj *RpcObject) RequestVoteRPC(args RequestVoteArgs, resp *RequestVoteResponse) error {
 
-	log.Printf("vote RPC: recv from '%s'\n", args.CandidateID)
+	log.Printf("RequestVoteRPC from '%s'\n", args.CandidateID)
 
 	obj.cm.Lock()
 	defer obj.cm.Unlock()
@@ -132,19 +131,25 @@ func (obj *RpcObject) RequestVoteRPC(args RequestVoteArgs, resp *RequestVoteResp
 	// INFO: Resetting leader id at election start (only at first vote)
 	if !obj.cm.HandleTerm(args.Term, "") {
 		resp.VoteGranted = false
-		log.Printf("vote RPC: discarded RPC from '%s' - term too old\n", args.CandidateID)
+		log.Printf("RequestVoteRPC from '%s': discarded after HandleTerm\n", args.CandidateID)
 		return nil
 	}
 
 	if !obj.cm.CanVoteFor(args.CheckIdx, args.CheckTerm, args.CandidateID) {
-		log.Printf("vote RPC: vote denied to '%s' - no leader completeness\n", args.CandidateID)
+		log.Printf("RequestVoteRPC from %s: denied after CanVoteFor\n", args.CandidateID)
 		resp.VoteGranted = false
 		return nil
 	}
 
 	resp.VoteGranted = obj.cm.VoteFor(args.CandidateID)
 
-	log.Printf("vote RPC: granted %t to '%s'\n", resp.VoteGranted, args.CandidateID)
+	var deniedOrGranted string
+	if resp.VoteGranted {
+		deniedOrGranted = "granted"
+	} else {
+		deniedOrGranted = "denied"
+	}
+	log.Printf("RequestVoteRPC from %s: vote '%s'\n", args.CandidateID, deniedOrGranted)
 
 	return nil
 }

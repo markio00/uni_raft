@@ -22,7 +22,7 @@ const (
 // - after RPC_CONN_RETRIES attempts, interval is increased to RPC_CONN_LONG_TIMEOUT
 func (cm *ConsensusModule) tryConnection(ip NodeID) {
 
-	log.Printf("try conn: '%s'\n", ip)
+	log.Printf("tryConnection: trying to connect to '%s'\n", ip)
 
 	// Use net.Dialer to provide context with timeout
 	dialer := &net.Dialer{}
@@ -45,27 +45,17 @@ func (cm *ConsensusModule) tryConnection(ip NodeID) {
 
 		// Send a warning if connection takes long
 		warnTimer := time.AfterFunc(RPC_CONN_WARN_TIMEOUT, func() {
-			log.Printf("Server %s unresponsive after %d ns\n", string(ip), RPC_CONN_WARN_TIMEOUT)
+			log.Printf("tryConnection: %s unresponsive after %d ns\n", string(ip), RPC_CONN_WARN_TIMEOUT)
 		})
 
 		// Try connection
 		conn, err := dialer.DialContext(ctx, "tcp", string(ip)+RPC_PORT)
 		if err == nil {
 			// if conn successful delete context and add client to the configuration
-			log.Printf("try conn: '%s' successful\n", ip)
+			log.Printf("tryConnection: connected to '%s'\n", ip)
 			warnTimer.Stop()
 			cm.connMutex.Lock()
-
-			c := cm.clusterConfiguration[ip]
-			cl := rpc.NewClient(conn)
-			if cl == nil {
-				panic("OOPS")
-			}
-			c.client = cl
-			cm.clusterConfiguration[ip] = c
-
-			// FIX: fix da shit
-
+			cm.clusterConfiguration[ip].client = rpc.NewClient(conn)
 			cm.connMutex.Unlock()
 
 			// signal connection now available
@@ -75,7 +65,7 @@ func (cm *ConsensusModule) tryConnection(ip NodeID) {
 		}
 
 		// if timeout or conn err occurrs, log it and cancel the context
-		log.Printf("try conn: '%s' - ERR - %s\n", string(ip), err)
+		log.Printf("tryConnection: trying to connect to '%s' generated error '%s'\n", string(ip), err)
 		cancel()
 
 		// wait for retry timer
@@ -95,33 +85,37 @@ func (cm *ConsensusModule) dropConnection(id NodeID) {
 
 func (cm *ConsensusModule) sendRpcRequest(id NodeID, method string, request any, reply any) {
 
-	log.Printf("attempting RPC: '%s' to '%s'\n", method, id)
 	for {
 		cm.connMutex.RLock()
 		// if try conn in progress wait
 		if cm.clusterConfiguration[id].client == nil {
 
 			cm.connMutex.RUnlock()
+			log.Printf("sendRpcRequest: waiting to send '%s' to '%s'\n", method, id)
 			select {
 			// if cancelation signal, early return
 			case <-cm.ctx.Done():
-				log.Printf("attempting RPC: '%s' to '%s' - closed by cancelation signal\n", method, id)
+				log.Printf(
+					"sendRpcRequest: attempt to send '%s' to '%s' stopped due to cancellation signal\n", 
+					method, 
+					id,
+				)
 				return
 			// when try conn terminates proceed with call request
 			case <-cm.clusterConfiguration[id].canConnect:
-				log.Printf("NOW CAN CONNECT to '%s'\n", id)
+				log.Printf("sendRpcRequest: now can connect to '%s' to perform '%s'\n", id, method)
 			}
 		} else {
 			cm.connMutex.RUnlock()
 		}
 
-		log.Printf("attempting RPC: '%s' to '%s' - no try conn in progress\n", method, id)
+		log.Printf("sendRpcRequest: attempting '%s' to '%s'\n", method, id)
 
 		// try request
 		cm.connMutex.RLock()
 		done := make(chan *rpc.Call, 10)
 		cm.clusterConfiguration[id].client.Go("RpcObject."+method, request, reply, done)
-		log.Printf("attempting RPC: '%s' to '%s' - Invoked async\n", method, id)
+		log.Printf("sendRpcRequest: sent '%s' to '%s' async.\n", method, id)
 		cm.connMutex.RUnlock()
 		var err error
 		err = nil
@@ -129,20 +123,24 @@ func (cm *ConsensusModule) sendRpcRequest(id NodeID, method string, request any,
 		// if call succeeds, return with correct result
 		case call := <-done:
 			if call.Error == nil {
-				log.Printf("attempting RPC: '%s' to '%s' - returned successfuly\n", method, id)
+				log.Printf("sendRpcRequest: received answer for '%s' from '%s'\n", method, id)
 				return
 			} else {
 				err = call.Error
 			}
 		// if cacelation signal, early return
 		case <-cm.ctx.Done():
-			log.Printf("attempting RPC: '%s' to '%s' - closed by cancelation signal\n", method, id)
+			log.Printf(
+				"sendRpcRequest: attempt to send '%s' to '%s' stopped due to cancellation signal\n", 
+				method, 
+				id,
+			)
 			return
 		}
 
 		// if call error, crop conn and try new one
-		log.Printf("attempting RPC: '%s' to '%s' - ERR - %s\n", method, id, err.Error())
-		log.Printf("attempting RPC: '%s' to '%s' - trying new connection\n", method, id)
+		log.Printf("sendRpcRequest: '%s' to '%s' generated error '%s'\n", method, id, err.Error())
+		log.Printf("sendRpcRequest: retrying connection to '%s' to send '%s'\n", id, method)
 		cm.dropConnection(id)
 		go cm.tryConnection(id)
 	}

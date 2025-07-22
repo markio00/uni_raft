@@ -174,7 +174,7 @@ func (cm *ConsensusModule) Start() {
 		d,
 		cm.startElection,
 	)
-	log.Printf("Reset election timeout to %d ns\n", d)
+	log.Printf("Start: Reset election timeout to %d ns\n", d)
 }
 
 // Applies the given command to the distributed cluster
@@ -186,7 +186,7 @@ func (cm *ConsensusModule) ApplyCommand(cmd Command) (string, error) {
 	// INFO: only triggered when LEADER
 
 	if !isCmdValid(cmd) {
-		return "", fmt.Errorf("Command %s is not valid", cmd[0])
+		return "", fmt.Errorf("ApplyCommand: Command %s is not valid", cmd[0])
 	}
 
 	path := getPath(cmd)
@@ -197,7 +197,7 @@ func (cm *ConsensusModule) ApplyCommand(cmd Command) (string, error) {
 	if _, ok := cm.opsInProgress[path]; ok {
 		if doOpTypesConflict(opType, cm.opsInProgress[path]) {
 			cm.mu.Unlock()
-			return "", fmt.Errorf("A conflicting operation on %s is already in progress", cmd[1])
+			return "", fmt.Errorf("ApplyCommand: A conflicting operation on %s is already in progress", cmd[1])
 		}
 	}
 
@@ -209,10 +209,10 @@ func (cm *ConsensusModule) ApplyCommand(cmd Command) (string, error) {
 
 	if cmd[0] == "CREATE" && ok {
 		cm.opsInProgress[cmd[1]] = NONE
-		return "", fmt.Errorf("File %s already exists", cmd[1])
+		return "", fmt.Errorf("ApplyCommand: File %s already exists", cmd[1])
 	} else if !ok {
 		cm.opsInProgress[cmd[1]] = NONE
-		return "", fmt.Errorf("File %s doesn't exist", cmd[1])
+		return "", fmt.Errorf("ApplyCommand: File %s doesn't exist", cmd[1])
 	}
 
 	// TODO: Send heartbeat for read-only requests (Chapter 8 of Raft)
@@ -298,19 +298,22 @@ func (cm *ConsensusModule) HandleTerm(reqTerm int, leaderID NodeID) bool {
 
 	if reqTerm < cm.currentTerm {
 		// requests generated in older terms get discarded
+		log.Printf("HandleTerm: received term %d lower than own term %d\n", reqTerm, cm.currentTerm)
 		return false
 	}
 
 	if reqTerm > cm.currentTerm {
 		cm.votedFor = leaderID
-		log.Printf("HandleTerm: set votedFor to '%s'\n", leaderID)
+		log.Printf("HandleTerm: set `votedFor` to '%s'\n", leaderID)
 
 		if cm.nodeStatus == LEADER {
-			log.Printf("HandleTerm: falling back to follower from leader\n")
+			log.Printf("HandleTerm: signaling leader-related threads to stop\n")
 			cm.leader2follower()
 		}
 		cm.nodeStatus = FOLLOWER
 		cm.currentTerm = reqTerm
+
+		log.Printf("HandleTerm: setting status to follower and term to %d\n", reqTerm)
 	}
 
 	return true
@@ -320,7 +323,7 @@ func (cm *ConsensusModule) HandleTerm(reqTerm int, leaderID NodeID) bool {
 func (cm *ConsensusModule) ResetElectionTimer() {
 	d := getRandomDuration(ELEC_TIMER_MIN, ELEC_TIMER_MAX)
 	cm.electionTimer.Reset(d)
-	log.Printf("Reset election timeout to %d ns\n", d)
+	log.Printf("ResetElectionTimer: Reset election timeout to %d ns\n", d)
 }
 
 /*
@@ -372,7 +375,14 @@ func (cm *ConsensusModule) CanVoteFor(checkIdx, checkTerm int, id NodeID) bool {
 	canVote := hasHigherTerm || hasHigherIdx
 
 	if !canVote {
-		log.Printf("election: can't vote '%s'cand['%d'@'%d'] self['%d'@'%d'] ", id, checkIdx, checkTerm, last_entry.Idx, last_entry.Term)
+		log.Printf(
+			"CanVoteFor: can't vote '%s'cand['%d'@'%d'] self['%d'@'%d'] ", 
+			id, 
+			checkIdx, 
+			checkTerm, 
+			last_entry.Idx, 
+			last_entry.Term,
+		)
 	}
 
 	return canVote
@@ -405,7 +415,7 @@ func (cm *ConsensusModule) Unlock() {
 
 func (cm *ConsensusModule) startElection() {
 
-	log.Printf("========= START ELECTION %d", cm.currentTerm)
+	log.Printf("========= START ELECTION for term %d =========", cm.currentTerm)
 	// stop previous election if timeout occurred
 	cm.mu.Lock()
 	if cm.nodeStatus == CANDIDATE {
@@ -453,7 +463,7 @@ func (cm *ConsensusModule) startElection() {
 		}(ch)
 	}
 
-	log.Println("election: sending RequestVoteRPCs ...")
+	log.Println("startElection: sent RequestVoteRPCs asynchronously")
 
 	cm.mu.Unlock()
 
@@ -463,7 +473,7 @@ func (cm *ConsensusModule) startElection() {
 	// BUG: If the new election process P_2 takes the lock before the old one P_1 reaches
 	// this point, some problems may arise as two election processes would run simultaneously.
 	// However this won't likely happen, as it's "impossible" for P_1 to take more
-	// than 150 ms (the least election timeout for P_2 to spawn) to reach this point
+	// than the least election timeout for P_2 to spawn to reach this point
 
 	electionWon := false
 	cm.multiElectionMutex.Lock()
@@ -471,7 +481,7 @@ func (cm *ConsensusModule) startElection() {
 		select {
 		case <-cm.ctx.Done():
 			cm.mu.Lock()
-			log.Println("election: lost due to cancelation signal")
+			log.Println("startElection: lost due to cancelation signal")
 			log.Println("###################### FOLLOWER #######################")
 			cm.nodeStatus = FOLLOWER
 			cm.ResetElectionTimer()
@@ -481,10 +491,10 @@ func (cm *ConsensusModule) startElection() {
 		case response := <-ch:
 			totVotes++
 			if response.voteGranted {
-				log.Printf("election: recv vote from '%s' - GRANTED\n", response.id)
+				log.Printf("startElection: received vote from '%s'\n", response.id)
 				votesGranted++
 			} else {
-				log.Printf("election: recv vote from '%s' - DENIED\n", response.id)
+				log.Printf("startElection: received rejection from '%s'\n", response.id)
 			}
 
 			electionWon = votesGranted >= cm.quorum
@@ -497,13 +507,13 @@ func (cm *ConsensusModule) startElection() {
 	cm.mu.Lock()
 
 	if electionWon {
-		log.Println("election: won")
+		log.Println("startElection: election won")
 		log.Println("####################### LEADER ########################")
 		cm.nodeStatus = LEADER
 		cm.electionTimer.Stop()
 		go cm.replicationManager()
 	} else {
-		log.Println("election: lost")
+		log.Println("startElection: election lost")
 		log.Println("###################### FOLLOWER #######################")
 		cm.nodeStatus = FOLLOWER
 		cm.ResetElectionTimer()
