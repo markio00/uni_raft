@@ -1,14 +1,10 @@
 package main
 
 import (
-	"fmt"
-	"io"
 	"log"
 	"mmarkia/uni/raft/full/cluster/raft"
-	"net/http"
 	"os"
 	"strconv"
-	"strings"
 	"time"
 )
 
