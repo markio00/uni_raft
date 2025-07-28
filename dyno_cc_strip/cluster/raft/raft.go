@@ -287,6 +287,7 @@ func (cm *ConsensusModule) appendNewLogEntry(cmd Command) int {
 
 func (cm *ConsensusModule) leader2follower() {
 	cm.ctxCancel()
+	// FIX: ResetElectionTimer()
 }
 
 /*
